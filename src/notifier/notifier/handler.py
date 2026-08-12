@@ -19,6 +19,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
+from urllib.parse import quote_plus
 
 import boto3
 from aws_lambda_powertools import Logger
@@ -98,12 +99,17 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
                 f"{escape(job['title'])}</a>{review_badge}{location_html}</div>"
             )
 
-        text_sections.append(f"{company} ({len(company_jobs)})\n" + "\n".join(text_lines))
+        glassdoor_url = f"https://www.glassdoor.com/Search/results.htm?keyword={quote_plus(company)}"
+
+        text_sections.append(f"{company} ({len(company_jobs)}) — Glassdoor: {glassdoor_url}\n" + "\n".join(text_lines))
         html_sections.append(
             f'<div style="margin-top:24px;">'
             f'<p style="margin:0 0 4px;font-size:13px;font-weight:600;color:#6b6b80;'
             f'text-transform:uppercase;letter-spacing:0.05em;">'
-            f"{escape(company)} &middot; {len(company_jobs)}</p>"
+            f"{escape(company)} &middot; {len(company_jobs)} "
+            f'<a href="{escape(glassdoor_url)}" '
+            f'style="text-transform:none;letter-spacing:normal;font-weight:400;color:#3454d1;'
+            f'text-decoration:none;">(Glassdoor)</a></p>'
             f"{''.join(html_rows)}</div>"
         )
 
