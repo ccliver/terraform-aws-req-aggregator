@@ -16,6 +16,24 @@ variable "enable_dashboard" {
   default     = true
 }
 
+variable "enable_cost_widget" {
+  description = "Whether to add a Cost Explorer widget (via the ccliver/cw-cost-widget/aws module) to the observability dashboard. Defaults to false (unlike enable_dashboard) because it requires a one-time manual step outside Terraform — activating cost_allocation_tag_key as a Cost Allocation Tag in AWS Billing — and shows no data until that's done and Cost Explorer has accrued cost from activation forward. Has no effect when enable_dashboard is false."
+  type        = bool
+  default     = false
+}
+
+variable "cost_allocation_tag_key" {
+  description = "Cost allocation tag key the cost widget filters AWS Cost Explorer by. Must match a tag key actually applied to this module's billed resources (e.g. via default_tags in the calling provider block) and activated as a Cost Allocation Tag in AWS Billing. Only used when enable_cost_widget is true."
+  type        = string
+  default     = "Project"
+}
+
+variable "cost_allocation_tag_values" {
+  description = "Cost allocation tag values to filter Cost Explorer by. Defaults to [var.prefix] when null, matching the common default_tags pattern of tagging every resource with the module's prefix (e.g. Project = local.prefix). Only used when enable_cost_widget is true."
+  type        = list(string)
+  default     = null
+}
+
 variable "ses_from_address" {
   description = "Verified SES sender email address"
   type        = string

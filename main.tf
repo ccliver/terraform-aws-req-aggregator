@@ -3,6 +3,8 @@ locals {
   lambda_names = ["orchestrator", "worker", "notifier"]
 }
 
+data "aws_caller_identity" "current" {}
+
 # Builds each Lambda's dependency-bundled zip automatically as part of
 # `terraform plan`/`apply` (see scripts/build-lambda-package.sh) — no separate
 # build step required, so `terraform init && terraform apply` alone is enough
@@ -414,233 +416,269 @@ resource "aws_scheduler_schedule" "notifier_weekend" {
 }
 
 
-# Dashboard is built entirely from standard AWS-published metrics (Lambda/SQS/DynamoDB/
-# Scheduler/SES) plus Logs Insights queries against the existing structured (Powertools JSON)
-# logs, so it costs nothing beyond the free tier: no custom PutMetricData/EMF metrics are
-# emitted. The account has 3 free dashboards/month — enable_dashboard exists so module users
-# who don't want it don't spend one of those slots on it.
-resource "aws_cloudwatch_dashboard" "observability" {
-  count = var.enable_dashboard ? 1 : 0
+module "cost_widget" {
+  count   = var.enable_cost_widget && var.enable_dashboard ? 1 : 0
+  source  = "ccliver/cw-cost-widget/aws"
+  version = "~> 1.4"
 
-  dashboard_name = "${local.prefix}-observability"
+  project_name               = "${local.prefix}-cost-widget"
+  cost_allocation_tag_key    = var.cost_allocation_tag_key
+  cost_allocation_tag_values = coalesce(var.cost_allocation_tag_values, [var.prefix])
+}
 
-  dashboard_body = jsonencode({
-    # Dashboard default is 3h if unset, which is too narrow for a pipeline that only
-    # runs a handful of times a day — several widgets (esp. the Logs Insights ones)
-    # would show no data most of the time. Two weeks gives the daily Jobs Written
-    # widget a meaningful trend line. This is overridable per-viewing in the console.
-    start = "-P14D"
-    widgets = [
-      {
-        type   = "metric"
-        x      = 0
-        y      = 0
-        width  = 8
-        height = 6
-        properties = {
-          title  = "Orchestrator: Invocations / Errors / Throttles"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Sum"
-          period = 300
-          metrics = [
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Invocations" }],
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Errors" }],
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Throttles" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 8
-        y      = 0
-        width  = 8
-        height = 6
-        properties = {
-          title  = "Worker: Invocations / Errors / Throttles"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Sum"
-          period = 300
-          metrics = [
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.worker.function_name, { label = "Invocations" }],
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.worker.function_name, { label = "Errors" }],
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.worker.function_name, { label = "Throttles" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 16
-        y      = 0
-        width  = 8
-        height = 6
-        properties = {
-          title  = "Notifier: Invocations / Errors / Throttles"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Sum"
-          period = 300
-          metrics = [
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Invocations" }],
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Errors" }],
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Throttles" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 0
-        y      = 6
-        width  = 8
-        height = 6
-        properties = {
-          title  = "Lambda: Duration (avg)"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Average"
-          period = 300
-          metrics = [
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Orchestrator" }],
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.worker.function_name, { label = "Worker" }],
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Notifier" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 8
-        y      = 6
-        width  = 8
-        height = 6
-        properties = {
-          title  = "SQS: Queue Depth / Oldest Message Age"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Maximum"
-          period = 300
-          metrics = [
-            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.worker.name, { label = "Worker Queue Depth" }],
-            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.worker_dlq.name, { label = "DLQ Depth" }],
-            ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", aws_sqs_queue.worker.name, { label = "Worker Oldest Message Age (s)", yAxis = "right" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 16
-        y      = 6
-        width  = 8
-        height = 6
-        properties = {
-          title  = "DynamoDB: Consumed Capacity"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Sum"
-          period = 300
-          metrics = [
-            ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", aws_dynamodb_table.jobs.name, { label = "Jobs Read" }],
-            ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", aws_dynamodb_table.jobs.name, { label = "Jobs Write" }],
-            ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", aws_dynamodb_table.companies.name, { label = "Companies Read" }],
-            ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", aws_dynamodb_table.companies.name, { label = "Companies Write" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 0
-        y      = 12
-        width  = 12
-        height = 6
-        properties = {
-          title  = "EventBridge Scheduler: Invocation Attempts / Target Errors"
-          region = var.aws_region
-          view   = "timeSeries"
-          stat   = "Sum"
-          period = 300
-          metrics = [
-            # All four schedules run in the "default" schedule group (no group_name set),
-            # so this is combined across orchestrator + notifier, weekday + weekend.
-            ["AWS/Scheduler", "InvocationAttemptCount", "ScheduleGroup", "default", { label = "Invocation Attempts" }],
-            ["AWS/Scheduler", "TargetErrorCount", "ScheduleGroup", "default", { label = "Target Errors" }],
-          ]
-        }
-      },
-      {
-        type   = "metric"
-        x      = 12
-        y      = 12
-        width  = 12
-        height = 6
-        properties = {
-          title  = "SES: Send / Bounce / Complaint"
-          region = var.aws_region
-          view   = "timeSeries"
-          period = 300
-          metrics = [
-            ["AWS/SES", "Send", { stat = "Sum", label = "Send" }],
-            ["AWS/SES", "Bounce", { stat = "Sum", label = "Bounce" }],
-            ["AWS/SES", "Complaint", { stat = "Sum", label = "Complaint" }],
-            ["AWS/SES", "Reputation.BounceRate", { stat = "Average", label = "Bounce Rate", yAxis = "right" }],
-            ["AWS/SES", "Reputation.ComplaintRate", { stat = "Average", label = "Complaint Rate", yAxis = "right" }],
-          ]
-        }
-      },
-      {
-        type   = "log"
-        x      = 0
-        y      = 18
-        width  = 24
-        height = 6
-        properties = {
-          title  = "Recent Errors / Warnings (all functions)"
-          region = var.aws_region
-          view   = "table"
-          query  = <<-EOQ
+resource "aws_lambda_permission" "cost_widget_dashboard" {
+  count = var.enable_cost_widget && var.enable_dashboard ? 1 : 0
+
+  statement_id   = "AllowCloudWatchDashboardInvoke"
+  action         = "lambda:InvokeFunction"
+  function_name  = module.cost_widget[0].lambda_function_name
+  principal      = "cloudwatch.amazonaws.com"
+  source_account = data.aws_caller_identity.current.account_id
+}
+
+locals {
+  # Split out from the dashboard resource below so the cost widget can be appended
+  # conditionally via concat() instead of hand-editing this list in place.
+  dashboard_widgets = [
+    {
+      type   = "metric"
+      x      = 0
+      y      = 0
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Orchestrator: Invocations / Errors / Throttles"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Invocations" }],
+          ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Errors" }],
+          ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Throttles" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 8
+      y      = 0
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Worker: Invocations / Errors / Throttles"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.worker.function_name, { label = "Invocations" }],
+          ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.worker.function_name, { label = "Errors" }],
+          ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.worker.function_name, { label = "Throttles" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 16
+      y      = 0
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Notifier: Invocations / Errors / Throttles"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Invocations" }],
+          ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Errors" }],
+          ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Throttles" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 0
+      y      = 6
+      width  = 8
+      height = 6
+      properties = {
+        title  = "Lambda: Duration (avg)"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Average"
+        period = 300
+        metrics = [
+          ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.orchestrator.function_name, { label = "Orchestrator" }],
+          ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.worker.function_name, { label = "Worker" }],
+          ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.notifier.function_name, { label = "Notifier" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 8
+      y      = 6
+      width  = 8
+      height = 6
+      properties = {
+        title  = "SQS: Queue Depth / Oldest Message Age"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Maximum"
+        period = 300
+        metrics = [
+          ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.worker.name, { label = "Worker Queue Depth" }],
+          ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.worker_dlq.name, { label = "DLQ Depth" }],
+          ["AWS/SQS", "ApproximateAgeOfOldestMessage", "QueueName", aws_sqs_queue.worker.name, { label = "Worker Oldest Message Age (s)", yAxis = "right" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 16
+      y      = 6
+      width  = 8
+      height = 6
+      properties = {
+        title  = "DynamoDB: Consumed Capacity"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", aws_dynamodb_table.jobs.name, { label = "Jobs Read" }],
+          ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", aws_dynamodb_table.jobs.name, { label = "Jobs Write" }],
+          ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", aws_dynamodb_table.companies.name, { label = "Companies Read" }],
+          ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", aws_dynamodb_table.companies.name, { label = "Companies Write" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 0
+      y      = 12
+      width  = 12
+      height = 6
+      properties = {
+        title  = "EventBridge Scheduler: Invocation Attempts / Target Errors"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          # All four schedules run in the "default" schedule group (no group_name set),
+          # so this is combined across orchestrator + notifier, weekday + weekend.
+          ["AWS/Scheduler", "InvocationAttemptCount", "ScheduleGroup", "default", { label = "Invocation Attempts" }],
+          ["AWS/Scheduler", "TargetErrorCount", "ScheduleGroup", "default", { label = "Target Errors" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 12
+      y      = 12
+      width  = 12
+      height = 6
+      properties = {
+        title  = "SES: Send / Bounce / Complaint"
+        region = var.aws_region
+        view   = "timeSeries"
+        period = 300
+        metrics = [
+          ["AWS/SES", "Send", { stat = "Sum", label = "Send" }],
+          ["AWS/SES", "Bounce", { stat = "Sum", label = "Bounce" }],
+          ["AWS/SES", "Complaint", { stat = "Sum", label = "Complaint" }],
+          ["AWS/SES", "Reputation.BounceRate", { stat = "Average", label = "Bounce Rate", yAxis = "right" }],
+          ["AWS/SES", "Reputation.ComplaintRate", { stat = "Average", label = "Complaint Rate", yAxis = "right" }],
+        ]
+      }
+    },
+    {
+      type   = "log"
+      x      = 0
+      y      = 18
+      width  = 24
+      height = 6
+      properties = {
+        title  = "Recent Errors / Warnings (all functions)"
+        region = var.aws_region
+        view   = "table"
+        query  = <<-EOQ
             SOURCE '${aws_cloudwatch_log_group.orchestrator.name}' | SOURCE '${aws_cloudwatch_log_group.worker.name}' | SOURCE '${aws_cloudwatch_log_group.notifier.name}'
             | fields @timestamp, @log, level, message
             | filter level in ["WARNING", "ERROR"]
             | sort @timestamp desc
             | limit 20
           EOQ
-        }
-      },
-      {
-        type   = "log"
-        x      = 0
-        y      = 24
-        width  = 12
-        height = 6
-        properties = {
-          title  = "Jobs Written per Day (worker)"
-          region = var.aws_region
-          view   = "timeSeries"
-          query  = <<-EOQ
+      }
+    },
+    {
+      type   = "log"
+      x      = 0
+      y      = 24
+      width  = 12
+      height = 6
+      properties = {
+        title  = "Jobs Written per Day (worker)"
+        region = var.aws_region
+        view   = "timeSeries"
+        query  = <<-EOQ
             SOURCE '${aws_cloudwatch_log_group.worker.name}'
             | filter message = "Worker done"
             | stats sum(jobs_written) as total_jobs_written by bin(1d)
           EOQ
-        }
-      },
-      {
-        type   = "log"
-        x      = 12
-        y      = 24
-        width  = 12
-        height = 6
-        properties = {
-          title  = "ATS Fetch / Backend Warnings (worker)"
-          region = var.aws_region
-          view   = "table"
-          query  = <<-EOQ
+      }
+    },
+    {
+      type   = "log"
+      x      = 12
+      y      = 24
+      width  = 12
+      height = 6
+      properties = {
+        title  = "ATS Fetch / Backend Warnings (worker)"
+        region = var.aws_region
+        view   = "table"
+        query  = <<-EOQ
             SOURCE '${aws_cloudwatch_log_group.worker.name}'
             | filter level = "WARNING"
             | fields @timestamp, message, company, ats, url, error
             | sort @timestamp desc
             | limit 20
           EOQ
-        }
-      },
-    ]
+      }
+    },
+  ]
+
+  cost_widget = {
+    type   = "custom"
+    x      = 0
+    y      = 30
+    width  = 24
+    height = 6
+    properties = {
+      title    = "Cost (${var.cost_allocation_tag_key} = ${var.prefix})"
+      endpoint = var.enable_cost_widget && var.enable_dashboard ? module.cost_widget[0].lambda_function_arn : ""
+      params = {
+        lookback_days = 30
+        granularity   = "MONTHLY"
+      }
+    }
+  }
+}
+
+resource "aws_cloudwatch_dashboard" "observability" {
+  count = var.enable_dashboard ? 1 : 0
+
+  dashboard_name = "${local.prefix}-observability"
+
+  dashboard_body = jsonencode({
+    start = "-P14D"
+    widgets = concat(
+      local.dashboard_widgets,
+      var.enable_cost_widget && var.enable_dashboard ? [local.cost_widget] : []
+    )
   })
 }

@@ -42,3 +42,8 @@ output "dashboard_url" {
   description = "Console URL for the CloudWatch observability dashboard, or null if enable_dashboard is false"
   value       = var.enable_dashboard ? "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.observability[0].dashboard_name}" : null
 }
+
+output "cost_widget_lambda_arn" {
+  description = "ARN of the cost widget Lambda, or null if enable_cost_widget/enable_dashboard is false"
+  value       = var.enable_cost_widget && var.enable_dashboard ? module.cost_widget[0].lambda_function_arn : null
+}

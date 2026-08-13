@@ -26,6 +26,11 @@ module "req_aggregator" {
   prefix           = local.prefix # names every AWS resource; independent of the repo/module name
   enable_dashboard = true         # built entirely from free AWS-published metrics/log queries; set false to skip using one of the 3 free dashboards/account
 
+  # --- Cost widget (off by default — needs the Project tag activated as a Cost Allocation Tag in AWS Billing first) ---
+  enable_cost_widget         = false
+  cost_allocation_tag_key    = "Project"      # matches default_tags below
+  cost_allocation_tag_values = [local.prefix] # or leave unset (null) to default to [prefix] automatically
+
   # --- SES (required, no default — verify both addresses in SES first) ---
   ses_from_address = "you@yourdomain.com"
   ses_to_address   = "you@yourdomain.com"
