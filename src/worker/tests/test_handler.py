@@ -8,12 +8,15 @@ from unittest.mock import MagicMock, patch
 import boto3
 import pytest
 import requests
+from bs4 import BeautifulSoup
 from moto import mock_aws
 
 from worker.handler import (
     _builtin_location_matches,
     _clearance_decision,
+    _extract_builtin_ld_json_salary,
     _extract_salary,
+    _fetch_builtin_job_description,
     _fetch_builtin_jobs,
     _fetch_greenhouse_jobs,
     _fetch_jobs,
@@ -24,6 +27,7 @@ from worker.handler import (
     _is_non_us_location,
     _location_matches,
     _make_job_id,
+    _plain_text,
     _title_keywords,
     handler,
 )
@@ -52,10 +56,14 @@ def test_make_job_id_differs_for_different_inputs() -> None:
         ("Compensation: 95,000-110,000 depending on experience.", "95,000-110,000"),
         ("Pay: 95000 to 110000 per year.", "95000 to 110000"),
         ("Base pay $120000 – $150000.", "$120000 – $150000"),
+        (
+            "The projected compensation range for this position is $53,000.00 to $108,000.00 (annualized USD).",
+            "$53,000.00 to $108,000.00",
+        ),
     ],
 )
 def test_extract_salary_matches_range_formats(text: str, expected: str) -> None:
-    """_extract_salary should find a salary range across the dollar/comma/dash format variants."""
+    """_extract_salary should find a salary range across the dollar/comma/dash/cents format variants."""
     assert _extract_salary(text) == expected
 
 
@@ -67,6 +75,55 @@ def test_extract_salary_returns_none_for_unrelated_numbers() -> None:
 def test_extract_salary_returns_none_for_no_numbers() -> None:
     """_extract_salary should return None when the text has no matching numbers at all."""
     assert _extract_salary("No clearance required.") is None
+
+
+def test_plain_text_strips_tags_between_numbers() -> None:
+    """_plain_text should remove HTML tags separating the two salary numbers, e.g. a <span>-wrapped range."""
+    html = '<span>$126,000</span><span class="divider">—</span><span>$213,600 USD</span>'
+    text = _plain_text(html)
+    assert _extract_salary(text) == "$126,000 — $213,600"
+
+
+def test_plain_text_unwinds_double_encoded_content() -> None:
+    """_plain_text should unwind a content field whose entire markup was itself HTML-escaped as text
+    (observed on a real Greenhouse posting), exposing the salary range inside."""
+    double_encoded = (
+        "&lt;div&gt;&lt;p&gt;United States Salary Range "
+        "&lt;span&gt;$126,000&lt;/span&gt;&lt;span&gt;&amp;mdash;&lt;/span&gt;&lt;span&gt;$213,600 USD&lt;/span&gt;"
+        "&lt;/p&gt;&lt;/div&gt;"
+    )
+    text = _plain_text(double_encoded)
+    assert _extract_salary(text) == "$126,000 — $213,600"
+
+
+def test_extract_builtin_ld_json_salary_parses_base_salary() -> None:
+    """_extract_builtin_ld_json_salary should read minValue/maxValue out of a JobPosting JSON-LD block."""
+    html = """
+    <script type="application/ld+json">
+    {"@context": "https://schema.org", "@graph": [{"@type": "JobPosting", "title": "Platform Engineer",
+    "baseSalary": {"@type": "MonetaryAmount", "currency": "USD",
+    "value": {"@type": "QuantitativeValue", "minValue": 110000, "maxValue": 160000, "unitText": "YEAR"}}}]}
+    </script>
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    assert _extract_builtin_ld_json_salary(soup) == "$110,000 - $160,000"
+
+
+def test_extract_builtin_ld_json_salary_returns_none_when_absent() -> None:
+    """_extract_builtin_ld_json_salary should return None when there's no JobPosting JSON-LD block at all."""
+    soup = BeautifulSoup("<html><body>No structured data here.</body></html>", "html.parser")
+    assert _extract_builtin_ld_json_salary(soup) is None
+
+
+def test_extract_builtin_ld_json_salary_returns_none_without_base_salary() -> None:
+    """_extract_builtin_ld_json_salary should return None when the JobPosting has no baseSalary field."""
+    html = """
+    <script type="application/ld+json">
+    {"@context": "https://schema.org", "@graph": [{"@type": "JobPosting", "title": "Platform Engineer"}]}
+    </script>
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    assert _extract_builtin_ld_json_salary(soup) is None
 
 
 @pytest.fixture()
@@ -414,6 +471,26 @@ def test_fetch_greenhouse_jobs_no_salary_key_when_none_found(mock_get) -> None:
     assert "salary" not in jobs[0]
 
 
+@patch("worker.handler.requests.get")
+def test_fetch_greenhouse_jobs_extracts_salary_from_double_encoded_content(mock_get) -> None:
+    """_fetch_greenhouse_jobs should still find a salary when the content field's entire markup was
+    itself HTML-escaped as literal text (a real posting observed in production), with the numbers
+    separated by tags rather than plain whitespace."""
+    double_encoded_content = (
+        "&lt;div&gt;&lt;p&gt;United States Salary Range "
+        "&lt;span&gt;$126,000&lt;/span&gt;&lt;span&gt;&amp;mdash;&lt;/span&gt;&lt;span&gt;$213,600 USD&lt;/span&gt;"
+        "&lt;/p&gt;&lt;/div&gt;"
+    )
+    mock_get.return_value.json.return_value = {
+        "jobs": [_greenhouse_posting("Platform Engineer", content=double_encoded_content)]
+    }
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_greenhouse_jobs("https://boards-api.greenhouse.io/v1/boards/acme/jobs")
+
+    assert jobs[0]["salary"] == "$126,000 — $213,600"
+
+
 # --- _fetch_lever_jobs unit tests ---
 
 
@@ -695,6 +772,23 @@ def test_fetch_workday_jobs_extracts_salary_range(mock_post, mock_get) -> None:
 
 @patch("worker.handler.requests.get")
 @patch("worker.handler.requests.post")
+def test_fetch_workday_jobs_extracts_salary_with_cents_suffix(mock_post, mock_get) -> None:
+    """_fetch_workday_jobs should extract a salary range formatted with a ".00" cents suffix
+    (the real Booz Allen Hamilton format that broke the original regex)."""
+    mock_post.return_value.json.return_value = _workday_page([_workday_posting("Platform Engineer", "R001")], total=1)
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_get.return_value.json.return_value = _workday_job_detail(
+        "The projected compensation range for this position is $53,000.00 to $108,000.00 (annualized USD)."
+    )
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
+
+    assert jobs[0]["salary"] == "$53,000.00 to $108,000.00"
+
+
+@patch("worker.handler.requests.get")
+@patch("worker.handler.requests.post")
 def test_fetch_workday_jobs_no_salary_key_when_none_found(mock_post, mock_get) -> None:
     """_fetch_workday_jobs should omit the salary key entirely when no range is found."""
     mock_post.return_value.json.return_value = _workday_page([_workday_posting("Platform Engineer", "R001")], total=1)
@@ -743,12 +837,27 @@ def _seed_companies(companies_table, *names: str) -> None:
         companies_table.put_item(Item={"company_name": name})
 
 
-def _mock_builtin_gets(mock_get, pages: list[str], description: str = "No clearance required.") -> None:
+def _builtin_ld_json_script(min_value: int, max_value: int) -> str:
+    """Build a JobPosting JSON-LD <script> block, as real Built In pages embed it."""
+    return (
+        '<script type="application/ld+json">'
+        f'{{"@context": "https://schema.org", "@graph": [{{"@type": "JobPosting", '
+        f'"baseSalary": {{"@type": "MonetaryAmount", "currency": "USD", '
+        f'"value": {{"@type": "QuantitativeValue", "minValue": {min_value}, "maxValue": {max_value}}}}}}}]}}'
+        "</script>"
+    )
+
+
+def _mock_builtin_gets(
+    mock_get, pages: list[str], description: str = "No clearance required.", ld_json: str = ""
+) -> None:
     """Wire mock_get.side_effect for both search-page and job-detail-page calls.
 
     Search-page requests carry a "page" key in their params kwarg; job-detail
     requests (_fetch_builtin_job_description) don't pass params at all, so
-    responses are dispatched based on that.
+    responses are dispatched based on that. ld_json, if given (see
+    _builtin_ld_json_script), is included in the detail-page response for
+    testing _extract_builtin_ld_json_salary via the full _fetch_builtin_jobs path.
     """
     responses = list(pages) + [_builtin_page_html([])]
 
@@ -758,7 +867,7 @@ def _mock_builtin_gets(mock_get, pages: list[str], description: str = "No cleara
         if kwargs.get("params", {}).get("page"):
             mock_resp.text = responses.pop(0) if len(responses) > 1 else responses[0]
         else:
-            mock_resp.text = f"<html><body>{description}</body></html>"
+            mock_resp.text = f"<html><body>{ld_json}{description}</body></html>"
         return mock_resp
 
     mock_get.side_effect = fake_get
@@ -1086,6 +1195,60 @@ def test_fetch_builtin_jobs_no_salary_key_when_none_found(mock_get, aws_resource
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
 
     assert "salary" not in jobs[0]
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_prefers_ld_json_salary_over_page_text(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should use the JobPosting JSON-LD baseSalary when present, even if
+    the visible description uses shorthand ("$110K-$160K") that the text regex can't parse."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "Acme", "Remote")])],
+        description="Salary Range: $110K-$160K, depending on experience and location.",
+        ld_json=_builtin_ld_json_script(110000, 160000),
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs[0]["salary"] == "$110,000 - $160,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_falls_back_to_text_regex_without_ld_json(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should fall back to the page-text regex when there's no JSON-LD salary."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "Acme", "Remote")])],
+        description="The salary range is $120,000 - $150,000 annually.",
+        ld_json="",
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_job_description_returns_tuple_with_ld_json_salary(mock_get) -> None:
+    """_fetch_builtin_job_description should return (text, salary) with salary from JSON-LD."""
+    mock_get.return_value.raise_for_status.return_value = None
+    mock_get.return_value.text = f"<html><body>{_builtin_ld_json_script(90000, 120000)}Some description.</body></html>"
+
+    description, salary = _fetch_builtin_job_description("https://builtin.com/job/1")
+
+    assert "Some description." in description
+    assert salary == "$90,000 - $120,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_job_description_request_failure_returns_empty_tuple(mock_get) -> None:
+    """_fetch_builtin_job_description should return ("", None) when the HTTP request raises."""
+    mock_get.side_effect = requests.RequestException("boom")
+
+    description, salary = _fetch_builtin_job_description("https://builtin.com/job/1")
+
+    assert description == ""
+    assert salary is None
 
 
 # --- _fetch_oracle_jobs unit tests ---

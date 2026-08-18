@@ -497,21 +497,39 @@ def _filter_relevant_jobs(jobs: list[dict[str, Any]], company: str) -> list[dict
     return work_type_matched
 
 
-_SALARY_RANGE_RE = re.compile(r"\$?\s*\d{2,3},?\d{3}\s*(?:-|–|—|to)\s*\$?\s*\d{2,3},?\d{3}")
+_SALARY_RANGE_RE = re.compile(r"\$?\s*\d{2,3},?\d{3}(?:\.\d{2})?\s*(?:-|–|—|to)\s*\$?\s*\d{2,3},?\d{3}(?:\.\d{2})?")
 
 
 def _extract_salary(text: str) -> str | None:
     """Look for a salary range in job description text, e.g. "$120,000 - $150,000".
 
-    Matches two 5-6 digit numbers (each optionally comma-separated and
-    dollar-prefixed) joined by a dash or "to", rather than anchoring on a
-    keyword like "salary" — that keyword isn't reliably near the numbers in
-    practice, while the paired-number shape itself is a strong enough signal
-    that unrelated figures (employee counts, revenue) rarely produce this
-    exact adjacency by coincidence.
+    Matches two 5-6 digit numbers (each optionally comma-separated, dollar-
+    prefixed, and cents-suffixed — e.g. "$53,000.00") joined by a dash or
+    "to", rather than anchoring on a keyword like "salary" — that keyword
+    isn't reliably near the numbers in practice, while the paired-number
+    shape itself is a strong enough signal that unrelated figures (employee
+    counts, revenue) rarely produce this exact adjacency by coincidence.
+    Callers should pass plain text (see _plain_text) — HTML tags between the
+    two numbers (e.g. each wrapped in its own <span>) break the match, since
+    only whitespace is allowed around the separator.
     """
     match = _SALARY_RANGE_RE.search(text)
     return match.group(0).strip() if match else None
+
+
+def _plain_text(html_text: str) -> str:
+    """Strip HTML tags and decode entities out of description text.
+
+    Run twice: most ATS description fields are ordinary single-encoded
+    HTML, but one observed in production (a Greenhouse posting whose
+    content field stored its entire markup HTML-escaped as literal text,
+    e.g. "&lt;div&gt;") needs a second pass to fully unwind. A second pass
+    on already-plain text is a no-op, so this is safe to always do.
+    """
+    text = html_text
+    for _ in range(2):
+        text = BeautifulSoup(text, "html.parser").get_text(separator=" ")
+    return text
 
 
 def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
@@ -564,7 +582,7 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
         }
         if needs_review:
             job["clearance_review"] = True
-        salary = _extract_salary(content)
+        salary = _extract_salary(_plain_text(content))
         if salary:
             job["salary"] = salary
         jobs.append(job)
@@ -732,7 +750,7 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
                 }
                 if needs_review:
                     job["clearance_review"] = True
-                salary = _extract_salary(description)
+                salary = _extract_salary(_plain_text(description))
                 if salary:
                     job["salary"] = salary
                 jobs.append(job)
@@ -839,24 +857,56 @@ def _builtin_card_text_by_icon(card: Tag, icon_class: str) -> str:
     return sibling.get_text(strip=True) if sibling else ""
 
 
-def _fetch_builtin_job_description(url: str) -> str:
-    """Fetch a single Built In job's detail page and return its cleaned text.
+def _extract_builtin_ld_json_salary(soup: BeautifulSoup) -> str | None:
+    """Pull baseSalary out of the schema.org JobPosting JSON-LD block Built In embeds on every job page.
+
+    This structured field is more reliable than scraping the page text: it's
+    exact (no "$110K-$160K" shorthand for _extract_salary's regex to parse),
+    and it's very likely also the source of the salary figure Built In shows
+    as a badge near the company name — that badge isn't present as page text
+    at all, so it wouldn't be caught by _extract_salary regardless.
+    """
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+        except (TypeError, ValueError):
+            continue
+        nodes = data.get("@graph", [data]) if isinstance(data, dict) else data
+        if not isinstance(nodes, list):
+            continue
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("@type") != "JobPosting":
+                continue
+            value = node.get("baseSalary", {}).get("value", {})
+            min_value, max_value = value.get("minValue"), value.get("maxValue")
+            if min_value and max_value:
+                return f"${min_value:,.0f} - ${max_value:,.0f}"
+    return None
+
+
+def _fetch_builtin_job_description(url: str) -> tuple[str, str | None]:
+    """Fetch a single Built In job's detail page: its cleaned text, and a salary if found.
 
     The full description is present in the server-rendered page — no special
-    container selector needed. Returns "" on any failure — callers fall back
-    to title-only clearance checking in that case, rather than dropping the
-    job outright over a transient error.
+    container selector needed. Returns ("", None) on any failure — callers
+    fall back to title-only clearance checking in that case, rather than
+    dropping the job outright over a transient error.
+
+    Returns:
+        Tuple of (cleaned page text, salary from the page's JobPosting
+        JSON-LD block if present — see _extract_builtin_ld_json_salary).
     """
     try:
         resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
         resp.raise_for_status()
     except requests.RequestException as exc:
         logger.warning("Built In job detail fetch failed", url=url, error=str(exc))
-        return ""
+        return "", None
     soup = BeautifulSoup(resp.text, "html.parser")
+    ld_json_salary = _extract_builtin_ld_json_salary(soup)
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
         tag.decompose()
-    return soup.get_text(separator=" ", strip=True)
+    return soup.get_text(separator=" ", strip=True), ld_json_salary
 
 
 def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
@@ -873,7 +923,11 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
     relevant (_title_looks_relevant), a follow-up request to the job's own
     detail page fetches the full description — both to catch clearance
     requirements that aren't mentioned in the title, and to look for a
-    salary range (see _extract_salary) — same pattern as _fetch_workday_jobs,
+    salary (preferring the page's JobPosting JSON-LD baseSalary field —
+    exact, and unaffected by Built In's occasional "$110K-$160K" shorthand
+    in the visible description — falling back to _extract_salary's regex
+    over the page text when no JSON-LD salary is present; see
+    _extract_builtin_ld_json_salary) — same pattern as _fetch_workday_jobs,
     and for the same avoid-an-extra-request-per-irrelevant-posting reason.
     Always fetched now; previously skipped when _clearance_screening_needed()
     was False, back when clearance was the description's only consumer.
@@ -888,7 +942,7 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
     Returns:
         Normalised list of job dicts with title, url, location, and company
         keys (plus clearance_review=True for an ambiguous clearance mention,
-        and salary when a pay range is found in the description).
+        and salary when a pay range is found).
     """
     known_companies = _get_known_company_names()
 
@@ -938,7 +992,7 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
                 continue
             href = title_el.get("href", "")
             job_url = _BUILTIN_BASE_URL + (href if isinstance(href, str) else "")
-            description = _fetch_builtin_job_description(job_url)
+            description, ld_json_salary = _fetch_builtin_job_description(job_url)
             excluded, needs_review = _clearance_decision(f"{title} {description}")
             if excluded:
                 clearance_skipped += 1
@@ -951,7 +1005,7 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
             }
             if needs_review:
                 job["clearance_review"] = True
-            salary = _extract_salary(description)
+            salary = ld_json_salary or _extract_salary(description)
             if salary:
                 job["salary"] = salary
             jobs.append(job)
@@ -1053,7 +1107,7 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
                 }
                 if needs_review:
                     job["clearance_review"] = True
-                salary = _extract_salary(description)
+                salary = _extract_salary(_plain_text(description))
                 if salary:
                     job["salary"] = salary
                 jobs.append(job)
