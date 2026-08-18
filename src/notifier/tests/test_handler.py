@@ -128,6 +128,32 @@ def test_build_email_body_omits_clearance_flag_when_not_set() -> None:
     assert "CLEARANCE" not in html
 
 
+def test_build_email_body_includes_salary_when_present() -> None:
+    """Email body should render a job's salary when the worker found one."""
+    jobs = [
+        {
+            "title": "Cloud Engineer",
+            "company": "Acme",
+            "url": "https://acme.com/1",
+            "location": "Remote",
+            "salary": "$120,000 - $150,000",
+        }
+    ]
+    text, html = _build_email_body(jobs)
+
+    assert "[$120,000 - $150,000]" in text
+    assert "$120,000 - $150,000</span>" in html
+
+
+def test_build_email_body_omits_salary_when_not_set() -> None:
+    """Email body should not mention salary for a job with no salary field."""
+    jobs = [{"title": "Cloud Engineer", "company": "Acme", "url": "https://acme.com/1", "location": "Remote"}]
+    text, html = _build_email_body(jobs)
+
+    assert "[$" not in text
+    assert "#d4edda" not in html
+
+
 def test_build_email_body_omits_location_line_when_blank() -> None:
     """Email body should not render an empty location line when location is missing."""
     jobs = [{"title": "SWE", "company": "Acme", "url": "https://acme.com/1", "location": ""}]

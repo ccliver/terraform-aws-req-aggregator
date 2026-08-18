@@ -13,6 +13,7 @@ from moto import mock_aws
 from worker.handler import (
     _builtin_location_matches,
     _clearance_decision,
+    _extract_salary,
     _fetch_builtin_jobs,
     _fetch_greenhouse_jobs,
     _fetch_jobs,
@@ -42,6 +43,30 @@ def test_make_job_id_differs_for_different_inputs() -> None:
     id1 = _make_job_id("Acme", "Engineer", "https://acme.com/jobs/1")
     id2 = _make_job_id("Acme", "Engineer", "https://acme.com/jobs/2")
     assert id1 != id2
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("The salary range is $120,000 - $150,000 annually.", "$120,000 - $150,000"),
+        ("Compensation: 95,000-110,000 depending on experience.", "95,000-110,000"),
+        ("Pay: 95000 to 110000 per year.", "95000 to 110000"),
+        ("Base pay $120000 – $150000.", "$120000 – $150000"),
+    ],
+)
+def test_extract_salary_matches_range_formats(text: str, expected: str) -> None:
+    """_extract_salary should find a salary range across the dollar/comma/dash format variants."""
+    assert _extract_salary(text) == expected
+
+
+def test_extract_salary_returns_none_for_unrelated_numbers() -> None:
+    """_extract_salary should not match a lone 6-digit figure with no paired range."""
+    assert _extract_salary("We've grown to over 120,000 customers worldwide.") is None
+
+
+def test_extract_salary_returns_none_for_no_numbers() -> None:
+    """_extract_salary should return None when the text has no matching numbers at all."""
+    assert _extract_salary("No clearance required.") is None
 
 
 @pytest.fixture()
@@ -119,6 +144,37 @@ def test_handler_writes_clearance_review_flag(mock_fetch, aws_resources: dict, l
 
     items = aws_resources["table"].scan()["Items"]
     assert items[0]["clearance_review"] is True
+
+
+@patch("worker.handler._fetch_jobs")
+def test_handler_writes_salary_when_present(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should persist a job's salary field when the fetcher found one."""
+    mock_fetch.return_value = [
+        {
+            "title": "Platform Engineer",
+            "url": "https://acme.com/jobs/1",
+            "location": "Remote",
+            "salary": "$120,000 - $150,000",
+        },
+    ]
+
+    handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
+
+    items = aws_resources["table"].scan()["Items"]
+    assert items[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler._fetch_jobs")
+def test_handler_omits_salary_when_absent(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should not write a salary key at all when the fetcher didn't find one."""
+    mock_fetch.return_value = [
+        {"title": "Platform Engineer", "url": "https://acme.com/jobs/1", "location": "Remote"},
+    ]
+
+    handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
+
+    items = aws_resources["table"].scan()["Items"]
+    assert "salary" not in items[0]
 
 
 @patch("worker.handler._fetch_jobs")
@@ -330,6 +386,32 @@ def test_fetch_greenhouse_jobs_flags_ambiguous_clearance_for_review(mock_get) ->
 
     assert len(jobs) == 1
     assert jobs[0]["clearance_review"] is True
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_greenhouse_jobs_extracts_salary_range(mock_get) -> None:
+    """_fetch_greenhouse_jobs should extract a salary range from the posting's content."""
+    mock_get.return_value.json.return_value = {
+        "jobs": [_greenhouse_posting("Platform Engineer", content="The salary range is $120,000 - $150,000 annually.")]
+    }
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_greenhouse_jobs("https://boards-api.greenhouse.io/v1/boards/acme/jobs")
+
+    assert jobs[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_greenhouse_jobs_no_salary_key_when_none_found(mock_get) -> None:
+    """_fetch_greenhouse_jobs should omit the salary key entirely when no range is found."""
+    mock_get.return_value.json.return_value = {
+        "jobs": [_greenhouse_posting("Platform Engineer", content="No clearance required.")]
+    }
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_greenhouse_jobs("https://boards-api.greenhouse.io/v1/boards/acme/jobs")
+
+    assert "salary" not in jobs[0]
 
 
 # --- _fetch_lever_jobs unit tests ---
@@ -578,19 +660,51 @@ def test_fetch_workday_jobs_description_fetch_failure_falls_back_to_title(mock_p
 
 @patch("worker.handler.requests.get")
 @patch("worker.handler.requests.post")
-def test_fetch_workday_jobs_skips_description_fetch_when_every_clearance_tier_allowed(
+def test_fetch_workday_jobs_still_fetches_description_when_every_clearance_tier_allowed(
     mock_post, mock_get, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_fetch_workday_jobs should not fetch a posting's description once every clearance tier is allowed."""
+    """_fetch_workday_jobs should still fetch a posting's description (for salary) even
+    once every clearance tier is allowed, unlike the clearance check which has nothing
+    left to resolve in that case."""
     monkeypatch.setenv("ALLOW_SECRET_CLEARANCE", "true")
     monkeypatch.setenv("ALLOW_TOP_SECRET_CLEARANCE", "true")
     mock_post.return_value.json.return_value = _workday_page([_workday_posting("Platform Engineer", "R001")], total=1)
     mock_post.return_value.raise_for_status.return_value = None
+    mock_get.return_value.json.return_value = _workday_job_detail("No clearance required.")
+    mock_get.return_value.raise_for_status.return_value = None
 
     jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
 
     assert len(jobs) == 1
-    mock_get.assert_not_called()
+    mock_get.assert_called_once()
+
+
+@patch("worker.handler.requests.get")
+@patch("worker.handler.requests.post")
+def test_fetch_workday_jobs_extracts_salary_range(mock_post, mock_get) -> None:
+    """_fetch_workday_jobs should extract a salary range from the posting's description."""
+    mock_post.return_value.json.return_value = _workday_page([_workday_posting("Platform Engineer", "R001")], total=1)
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_get.return_value.json.return_value = _workday_job_detail("The salary range is $120,000 - $150,000 annually.")
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
+
+    assert jobs[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler.requests.get")
+@patch("worker.handler.requests.post")
+def test_fetch_workday_jobs_no_salary_key_when_none_found(mock_post, mock_get) -> None:
+    """_fetch_workday_jobs should omit the salary key entirely when no range is found."""
+    mock_post.return_value.json.return_value = _workday_page([_workday_posting("Platform Engineer", "R001")], total=1)
+    mock_post.return_value.raise_for_status.return_value = None
+    mock_get.return_value.json.return_value = _workday_job_detail("No clearance required.")
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
+
+    assert "salary" not in jobs[0]
 
 
 # --- _fetch_builtin_jobs unit tests ---
@@ -926,10 +1040,12 @@ def test_fetch_builtin_jobs_description_fetch_failure_falls_back_to_title(mock_g
 
 
 @patch("worker.handler.requests.get")
-def test_fetch_builtin_jobs_skips_description_fetch_when_every_clearance_tier_allowed(
+def test_fetch_builtin_jobs_still_fetches_detail_page_when_every_clearance_tier_allowed(
     mock_get, aws_resources: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """_fetch_builtin_jobs should not fetch a posting's detail page once every clearance tier is allowed."""
+    """_fetch_builtin_jobs should still fetch a posting's detail page (for salary) even
+    once every clearance tier is allowed, unlike the clearance check which has nothing
+    left to resolve in that case."""
     monkeypatch.setenv("ALLOW_SECRET_CLEARANCE", "true")
     monkeypatch.setenv("ALLOW_TOP_SECRET_CLEARANCE", "true")
     _mock_builtin_gets(
@@ -940,7 +1056,36 @@ def test_fetch_builtin_jobs_skips_description_fetch_when_every_clearance_tier_al
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
 
     assert len(jobs) == 1
-    assert mock_get.call_count == 2
+    # Two search-page calls (one with results, one empty to stop pagination) plus one detail-page call.
+    assert mock_get.call_count == 3
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_extracts_salary_range(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should extract a salary range from the posting's detail page text."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "Acme", "Remote")])],
+        description="The salary range is $120,000 - $150,000 annually.",
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert jobs[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_builtin_jobs_no_salary_key_when_none_found(mock_get, aws_resources: dict) -> None:
+    """_fetch_builtin_jobs should omit the salary key entirely when no range is found."""
+    _mock_builtin_gets(
+        mock_get,
+        [_builtin_page_html([_builtin_card_html("Cloud Engineer", "/job/cloud-engineer/1", "Acme", "Remote")])],
+        description="No clearance required.",
+    )
+
+    jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
+
+    assert "salary" not in jobs[0]
 
 
 # --- _fetch_oracle_jobs unit tests ---
@@ -1132,6 +1277,42 @@ def test_fetch_oracle_jobs_flags_ambiguous_clearance_for_review(mock_get) -> Non
 
     assert len(jobs) == 1
     assert jobs[0]["clearance_review"] is True
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_oracle_jobs_extracts_salary_range(mock_get) -> None:
+    """_fetch_oracle_jobs should extract a salary range from the posting's ShortDescriptionStr."""
+    _mock_oracle_search(
+        mock_get,
+        {
+            "platform": [
+                _oracle_item(
+                    [
+                        _oracle_posting(
+                            "Platform Engineer",
+                            "1001",
+                            description="The salary range is $120,000 - $150,000 annually.",
+                        )
+                    ],
+                    total=1,
+                )
+            ]
+        },
+    )
+
+    jobs = _fetch_oracle_jobs(_ORACLE_CAREERS_URL)
+
+    assert jobs[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_oracle_jobs_no_salary_key_when_none_found(mock_get) -> None:
+    """_fetch_oracle_jobs should omit the salary key entirely when no range is found."""
+    _mock_oracle_search(mock_get, {"platform": [_oracle_item([_oracle_posting("Platform Engineer", "1001")], total=1)]})
+
+    jobs = _fetch_oracle_jobs(_ORACLE_CAREERS_URL)
+
+    assert "salary" not in jobs[0]
 
 
 # --- _filter_relevant_jobs unit tests ---

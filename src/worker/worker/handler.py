@@ -207,8 +207,10 @@ def _clearance_screening_needed() -> bool:
     False only when every tier (Public Trust, Secret, Top Secret) is
     allowed — in that case no clearance mention could exclude a posting, and
     an ambiguous mention has nothing left to resolve either. The Workday and
-    Built In fetchers skip their extra per-posting detail-page request in
-    that case, since it exists solely to feed _clearance_decision.
+    Built In fetchers no longer skip their extra per-posting detail-page
+    request in that case (they used to, back when clearance screening was
+    its only consumer) — that request also feeds _extract_salary now, so it
+    always runs for a relevant-titled posting.
     """
     return not (_allow_public_trust() and _allow_secret_clearance() and _allow_top_secret_clearance())
 
@@ -495,6 +497,23 @@ def _filter_relevant_jobs(jobs: list[dict[str, Any]], company: str) -> list[dict
     return work_type_matched
 
 
+_SALARY_RANGE_RE = re.compile(r"\$?\s*\d{2,3},?\d{3}\s*(?:-|–|—|to)\s*\$?\s*\d{2,3},?\d{3}")
+
+
+def _extract_salary(text: str) -> str | None:
+    """Look for a salary range in job description text, e.g. "$120,000 - $150,000".
+
+    Matches two 5-6 digit numbers (each optionally comma-separated and
+    dollar-prefixed) joined by a dash or "to", rather than anchoring on a
+    keyword like "salary" — that keyword isn't reliably near the numbers in
+    practice, while the paired-number shape itself is a strong enough signal
+    that unrelated figures (employee counts, revenue) rarely produce this
+    exact adjacency by coincidence.
+    """
+    match = _SALARY_RANGE_RE.search(text)
+    return match.group(0).strip() if match else None
+
+
 def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
     """Fetch job listings from a Greenhouse JSON API endpoint.
 
@@ -508,7 +527,9 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
 
     Returns:
         Normalised list of job dicts with title, url, location keys (plus
-        clearance_review=True for jobs with an ambiguous clearance mention).
+        clearance_review=True for jobs with an ambiguous clearance mention,
+        and salary when a pay range is found in the description — see
+        _extract_salary).
     """
     try:
         resp = requests.get(careers_url, params={"content": "true"}, timeout=30)
@@ -531,7 +552,8 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
     clearance_skipped = 0
     for posting in data.get("jobs", []):
         title = posting.get("title", "")
-        excluded, needs_review = _clearance_decision(f"{title} {posting.get('content', '')}")
+        content = posting.get("content", "")
+        excluded, needs_review = _clearance_decision(f"{title} {content}")
         if excluded:
             clearance_skipped += 1
             continue
@@ -542,6 +564,9 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
         }
         if needs_review:
             job["clearance_review"] = True
+        salary = _extract_salary(content)
+        if salary:
+            job["salary"] = salary
         jobs.append(job)
     logger.info("Greenhouse jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
     return jobs
@@ -635,17 +660,20 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
     ones. The same posting can surface under multiple keywords, so seen_paths
     dedupes across searches to avoid double-processing (and double-fetching
     descriptions for) the same posting. For postings whose title already
-    looks relevant, a follow-up request fetches the full description to
-    catch clearance requirements that aren't mentioned in the title — skipped
-    entirely when _clearance_screening_needed() is False, since that's its
-    only use.
+    looks relevant, a follow-up request fetches the full description — both
+    to catch clearance requirements that aren't mentioned in the title, and
+    to look for a salary range (see _extract_salary). Always fetched now;
+    previously skipped when _clearance_screening_needed() was False, back
+    when clearance was the description's only consumer.
 
     Args:
         careers_url: Careers URL of the form
             https://{tenant}.wd{N}.myworkdayjobs.com/{site}.
 
     Returns:
-        Normalised list of job dicts with title, url, location keys.
+        Normalised list of job dicts with title, url, location keys (plus
+        clearance_review=True for an ambiguous clearance mention, and salary
+        when a pay range is found in the description).
     """
     match = _WORKDAY_URL_RE.match(careers_url)
     if not match:
@@ -692,11 +720,7 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
                 if not _title_looks_relevant(title):
                     continue
                 seen_paths.add(external_path)
-                description = (
-                    _fetch_workday_job_description(tenant, wd, site, external_path)
-                    if _clearance_screening_needed()
-                    else ""
-                )
+                description = _fetch_workday_job_description(tenant, wd, site, external_path)
                 excluded, needs_review = _clearance_decision(f"{title} {description}")
                 if excluded:
                     clearance_skipped += 1
@@ -708,6 +732,9 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
                 }
                 if needs_review:
                     job["clearance_review"] = True
+                salary = _extract_salary(description)
+                if salary:
+                    job["salary"] = salary
                 jobs.append(job)
 
             offset += _WORKDAY_PAGE_SIZE
@@ -844,20 +871,24 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
     more completely, by their own direct fetch). The search results don't
     include job descriptions, so for postings whose title already looks
     relevant (_title_looks_relevant), a follow-up request to the job's own
-    detail page fetches the full description to catch clearance requirements
-    that aren't mentioned in the title — same pattern as _fetch_workday_jobs,
-    and for the same reason (avoid an extra request per irrelevant posting);
-    also skipped entirely when _clearance_screening_needed() is False.
-    Postings are also dropped by _builtin_location_matches (BUILTIN_LOCATION /
-    BUILTIN_WORK_TYPE env vars) before the description fetch, for the same
-    cost-avoidance reason.
+    detail page fetches the full description — both to catch clearance
+    requirements that aren't mentioned in the title, and to look for a
+    salary range (see _extract_salary) — same pattern as _fetch_workday_jobs,
+    and for the same avoid-an-extra-request-per-irrelevant-posting reason.
+    Always fetched now; previously skipped when _clearance_screening_needed()
+    was False, back when clearance was the description's only consumer.
+    Postings are still dropped by _builtin_location_matches (BUILTIN_LOCATION /
+    BUILTIN_WORK_TYPE env vars) before the description fetch, for cost
+    avoidance.
 
     Args:
         careers_url: A Built In search URL, e.g.
             https://builtin.com/jobs?search=AWS&daysSinceUpdated=3
 
     Returns:
-        Normalised list of job dicts with title, url, location, and company keys.
+        Normalised list of job dicts with title, url, location, and company
+        keys (plus clearance_review=True for an ambiguous clearance mention,
+        and salary when a pay range is found in the description).
     """
     known_companies = _get_known_company_names()
 
@@ -907,7 +938,7 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
                 continue
             href = title_el.get("href", "")
             job_url = _BUILTIN_BASE_URL + (href if isinstance(href, str) else "")
-            description = _fetch_builtin_job_description(job_url) if _clearance_screening_needed() else ""
+            description = _fetch_builtin_job_description(job_url)
             excluded, needs_review = _clearance_decision(f"{title} {description}")
             if excluded:
                 clearance_skipped += 1
@@ -920,6 +951,9 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
             }
             if needs_review:
                 job["clearance_review"] = True
+            salary = _extract_salary(description)
+            if salary:
+                job["salary"] = salary
             jobs.append(job)
 
     logger.info(
@@ -952,7 +986,9 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
 
     Returns:
         Normalised list of job dicts with title, url, location keys (plus
-        clearance_review=True for jobs with an ambiguous clearance mention).
+        clearance_review=True for jobs with an ambiguous clearance mention,
+        and salary when a pay range is found in the description — see
+        _extract_salary).
     """
     match = _ORACLE_URL_RE.match(careers_url)
     if not match:
@@ -1017,6 +1053,9 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
                 }
                 if needs_review:
                     job["clearance_review"] = True
+                salary = _extract_salary(description)
+                if salary:
+                    job["salary"] = salary
                 jobs.append(job)
 
             offset += _ORACLE_PAGE_SIZE
@@ -1102,6 +1141,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             }
             if job.get("clearance_review"):
                 item["clearance_review"] = True
+            if job.get("salary"):
+                item["salary"] = job["salary"]
             # condition_expression prevents overwriting existing items
             try:
                 table.put_item(
