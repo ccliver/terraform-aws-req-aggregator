@@ -22,7 +22,7 @@ Clearance filtering is tiered, not a blanket cutoff: Public Trust, Secret, and T
 
 <img src="docs/dashboard.png" alt="req-aggregator CloudWatch dashboard: per-function Lambda invocations/errors/throttles for the Orchestrator, Worker, and Notifier, Lambda duration, SQS queue depth and DLQ backlog, DynamoDB consumed capacity, EventBridge Scheduler invocation attempts, SES send/bounce/complaint, a table of recent errors and warnings across all three functions, a daily jobs-written trend, and a table of ATS/backend fetch warnings.">
 
-A `<prefix>-observability` CloudWatch dashboard (`main.tf`) tracks the pipeline end-to-end using only standard AWS-published metrics for Lambda, SQS, DynamoDB, EventBridge Scheduler, and SES, plus three CloudWatch Logs Insights widgets against the existing structured (Powertools JSON) logs — recent errors/warnings, jobs written per day, and ATS/backend fetch warnings (e.g. a company whose `ats` value doesn't match a supported backend). No custom metrics are emitted, so it stays within CloudWatch's free tier.
+A CloudWatch dashboard (`main.tf`) tracks the pipeline end-to-end using only standard AWS-published metrics for Lambda, SQS, DynamoDB, EventBridge Scheduler, and SES, plus three CloudWatch Logs Insights widgets against the existing structured (Powertools JSON) logs — recent errors/warnings, jobs written per day, and ATS/backend fetch warnings (e.g. a company whose `ats` value doesn't match a supported backend). No custom metrics are emitted, so it stays within CloudWatch's free tier.
 
 ## Usage
 
