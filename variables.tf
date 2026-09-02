@@ -155,3 +155,9 @@ variable "worker_memory_mb" {
   type        = number
   default     = 512
 }
+
+variable "log_retention_days" {
+  description = "CloudWatch Logs retention in days for the orchestrator, worker, and notifier Lambda log groups"
+  type        = number
+  default     = 30
+}

@@ -70,6 +70,9 @@ module "req_aggregator" {
   lambda_timeout_seconds = 300
   lambda_memory_mb       = 512 # orchestrator + notifier
   worker_memory_mb       = 512
+
+  # --- Observability ---
+  log_retention_days = 30
 }
 
 output "dashboard_url" {

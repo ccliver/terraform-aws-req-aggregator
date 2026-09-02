@@ -164,7 +164,7 @@ resource "aws_lambda_function" "orchestrator" {
 
 resource "aws_cloudwatch_log_group" "orchestrator" {
   name              = "/aws/lambda/${aws_lambda_function.orchestrator.function_name}"
-  retention_in_days = 14
+  retention_in_days = var.log_retention_days
 }
 
 resource "aws_lambda_function" "worker" {
@@ -202,7 +202,7 @@ resource "aws_lambda_event_source_mapping" "worker_sqs" {
 
 resource "aws_cloudwatch_log_group" "worker" {
   name              = "/aws/lambda/${aws_lambda_function.worker.function_name}"
-  retention_in_days = 14
+  retention_in_days = var.log_retention_days
 }
 
 resource "aws_lambda_function" "notifier" {
@@ -228,7 +228,7 @@ resource "aws_lambda_function" "notifier" {
 
 resource "aws_cloudwatch_log_group" "notifier" {
   name              = "/aws/lambda/${aws_lambda_function.notifier.function_name}"
-  retention_in_days = 14
+  retention_in_days = var.log_retention_days
 }
 
 
@@ -647,6 +647,23 @@ locals {
             | fields @timestamp, message, company, ats, url, error
             | sort @timestamp desc
             | limit 20
+          EOQ
+      }
+    },
+    {
+      type   = "log"
+      x      = 0
+      y      = 30
+      width  = 24
+      height = 6
+      properties = {
+        title  = "Job Filter Funnel per Day (worker)"
+        region = var.aws_region
+        view   = "timeSeries"
+        query  = <<-EOQ
+            SOURCE '${aws_cloudwatch_log_group.worker.name}'
+            | filter message = "Job filter complete"
+            | stats sum(extracted) as extracted, sum(excluded) as title_excluded, sum(non_us_excluded) as non_us_excluded, sum(work_type_excluded) as work_type_excluded, sum(dropped) as total_dropped by bin(1d)
           EOQ
       }
     },
