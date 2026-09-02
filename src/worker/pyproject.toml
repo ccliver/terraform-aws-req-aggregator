@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Worker Lambda - fetches job postings from ATS APIs and writes them to DynamoDB"
 requires-python = ">=3.13"
 dependencies = [
-    "boto3>=1.37",
+    "boto3>=1.43.83",
     "aws-lambda-powertools>=3.0",
     "beautifulsoup4>=4.12",
     "requests>=2.32",
