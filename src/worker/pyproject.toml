@@ -7,7 +7,7 @@ dependencies = [
     "boto3>=1.37",
     "aws-lambda-powertools>=3.0",
     "beautifulsoup4>=4.12",
-    "requests>=2.32",
+    "requests>=2.34.2",
 ]
 
 [build-system]
