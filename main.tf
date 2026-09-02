@@ -663,7 +663,7 @@ locals {
         query  = <<-EOQ
             SOURCE '${aws_cloudwatch_log_group.worker.name}'
             | filter message = "Job filter complete"
-            | stats sum(extracted) as extracted, sum(excluded) as title_excluded, sum(non_us_excluded) as non_us_excluded, sum(work_type_excluded) as work_type_excluded, sum(dropped) as total_dropped by bin(1d)
+            | stats sum(extracted) as extracted, sum(matched) as title_matched, sum(excluded) as exclude_keyword_hits, sum(non_us_excluded) as non_us_excluded, sum(work_type_excluded) as work_type_excluded, sum(dropped) as total_dropped by bin(1d)
           EOQ
       }
     },
