@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import boto3
 import pytest
@@ -22,7 +22,21 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
         table = dynamodb.create_table(
             TableName="test-jobs",
             KeySchema=[{"AttributeName": "job_id", "KeyType": "HASH"}],
-            AttributeDefinitions=[{"AttributeName": "job_id", "AttributeType": "S"}],
+            AttributeDefinitions=[
+                {"AttributeName": "job_id", "AttributeType": "S"},
+                {"AttributeName": "digest_pending", "AttributeType": "S"},
+                {"AttributeName": "discovered_at", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "pending-digest-index",
+                    "KeySchema": [
+                        {"AttributeName": "digest_pending", "KeyType": "HASH"},
+                        {"AttributeName": "discovered_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                }
+            ],
             BillingMode="PAY_PER_REQUEST",
         )
 
@@ -33,21 +47,24 @@ def aws_resources(monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("JOBS_TABLE", "test-jobs")
         monkeypatch.setenv("SES_FROM_ADDRESS", FROM_ADDRESS)
         monkeypatch.setenv("SES_TO_ADDRESS", TO_ADDRESS)
-        monkeypatch.setenv("LOOKBACK_MINUTES", "60")
         monkeypatch.setenv("SES_REGION", REGION)
 
         yield {"table": table, "ses": ses}
 
 
-def _recent_job(job_id: str, title: str, minutes_ago: int = 5) -> dict:
-    return {
+def _job(job_id: str, title: str, sent: bool = False) -> dict:
+    item = {
         "job_id": job_id,
         "company": "Acme",
         "title": title,
         "url": f"https://acme.com/{job_id}",
         "location": "Remote",
-        "discovered_at": (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat(),
+        "discovered_at": datetime.now(UTC).isoformat(),
+        "sent_in_digest": sent,
     }
+    if not sent:
+        item["digest_pending"] = "pending"
+    return item
 
 
 def test_build_email_body_contains_job_info() -> None:
@@ -174,8 +191,8 @@ def test_handler_no_jobs_skips_email(aws_resources: dict, lambda_context) -> Non
 
 
 def test_handler_sends_email_when_jobs_found(aws_resources: dict, lambda_context) -> None:
-    """handler() should send one SES email when recent jobs exist."""
-    aws_resources["table"].put_item(Item=_recent_job("job-1", "SWE"))
+    """handler() should send one SES email when pending jobs exist."""
+    aws_resources["table"].put_item(Item=_job("job-1", "SWE"))
 
     result = handler({}, lambda_context)
 
@@ -184,20 +201,31 @@ def test_handler_sends_email_when_jobs_found(aws_resources: dict, lambda_context
     assert send_stats["SendDataPoints"] != []
 
 
-def test_handler_ignores_old_jobs(aws_resources: dict, lambda_context) -> None:
-    """handler() should not email jobs outside the lookback window."""
-    aws_resources["table"].put_item(Item=_recent_job("job-old", "SWE", minutes_ago=90))
+def test_handler_ignores_already_sent_jobs(aws_resources: dict, lambda_context) -> None:
+    """handler() should not re-email a job already marked sent_in_digest."""
+    aws_resources["table"].put_item(Item=_job("job-old", "SWE", sent=True))
 
     result = handler({}, lambda_context)
 
     assert result["jobs_emailed"] == 0
 
 
-def test_handler_emails_all_recent_jobs(aws_resources: dict, lambda_context) -> None:
-    """handler() should include all jobs within the lookback window in one email."""
-    aws_resources["table"].put_item(Item=_recent_job("job-1", "SWE"))
-    aws_resources["table"].put_item(Item=_recent_job("job-2", "SRE"))
+def test_handler_emails_all_pending_jobs(aws_resources: dict, lambda_context) -> None:
+    """handler() should include all pending jobs in one email."""
+    aws_resources["table"].put_item(Item=_job("job-1", "SWE"))
+    aws_resources["table"].put_item(Item=_job("job-2", "SRE"))
 
     result = handler({}, lambda_context)
 
     assert result["jobs_emailed"] == 2
+
+
+def test_handler_marks_jobs_sent_after_email(aws_resources: dict, lambda_context) -> None:
+    """handler() should flip sent_in_digest and drop digest_pending after a successful send."""
+    aws_resources["table"].put_item(Item=_job("job-1", "SWE"))
+
+    handler({}, lambda_context)
+
+    item = aws_resources["table"].get_item(Key={"job_id": "job-1"})["Item"]
+    assert item["sent_in_digest"] is True
+    assert "digest_pending" not in item

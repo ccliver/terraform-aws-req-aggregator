@@ -74,12 +74,6 @@ variable "schedule_timezone" {
   default     = "America/New_York"
 }
 
-variable "lookback_minutes" {
-  description = "Minutes the Notifier looks back when querying for new jobs"
-  type        = number
-  default     = 60
-}
-
 variable "builtin_location" {
   description = "Location substring to additionally keep for the Built In (builtin.com) ATS backend; blank disables it (remote-only)"
   type        = string

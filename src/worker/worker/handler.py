@@ -1192,6 +1192,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "url": job["url"],
                 "location": job.get("location", ""),
                 "discovered_at": datetime.now(UTC).isoformat(),
+                "sent_in_digest": False,
+                "digest_pending": "pending",
             }
             if job.get("clearance_review"):
                 item["clearance_review"] = True

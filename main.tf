@@ -119,13 +119,19 @@ resource "aws_iam_role_policy" "notifier" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "DynamoDBScanJobs"
+        Sid    = "DynamoDBQueryJobs"
         Effect = "Allow"
-        Action = ["dynamodb:Scan", "dynamodb:Query"]
+        Action = ["dynamodb:Query"]
         Resource = [
           aws_dynamodb_table.jobs.arn,
           "${aws_dynamodb_table.jobs.arn}/index/*"
         ]
+      },
+      {
+        Sid      = "DynamoDBUpdateJobs"
+        Effect   = "Allow"
+        Action   = ["dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.jobs.arn
       },
       {
         Sid      = "SESSendEmail"
@@ -220,7 +226,6 @@ resource "aws_lambda_function" "notifier" {
       JOBS_TABLE       = aws_dynamodb_table.jobs.name
       SES_FROM_ADDRESS = var.ses_from_address
       SES_TO_ADDRESS   = var.ses_to_address
-      LOOKBACK_MINUTES = tostring(var.lookback_minutes)
       SES_REGION       = var.aws_region
     }
   }
@@ -294,17 +299,22 @@ resource "aws_dynamodb_table" "jobs" {
     type = "S"
   }
 
-  # TODO: add a GSI on discovered_at so the Notifier can do efficient
-  # time-range queries instead of a full table scan.
-  # attribute {
-  #   name = "discovered_at"
-  #   type = "S"
-  # }
-  # global_secondary_index {
-  #   name               = "discovered_at-index"
-  #   hash_key           = "discovered_at"
-  #   projection_type    = "ALL"
-  # }
+  attribute {
+    name = "digest_pending"
+    type = "S"
+  }
+
+  attribute {
+    name = "discovered_at"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "pending-digest-index"
+    hash_key        = "digest_pending"
+    range_key       = "discovered_at"
+    projection_type = "ALL"
+  }
 
   tags = {
     Name = "${local.prefix}-jobs"

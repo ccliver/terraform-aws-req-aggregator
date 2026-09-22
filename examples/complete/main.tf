@@ -41,7 +41,6 @@ module "req_aggregator" {
   notifier_weekday_schedule     = "cron(30 8-18/2 ? * MON-FRI *)" # 30 min after orchestrator
   notifier_weekend_schedule     = "cron(30 8 ? * SAT-SUN *)"
   schedule_timezone             = "America/New_York" # EventBridge Scheduler handles DST automatically
-  lookback_minutes              = 60                 # how far back the Notifier looks for new jobs
 
   # --- Location / work-type filtering ---
   # location/work_type apply to every ATS backend except builtin; builtin_location/

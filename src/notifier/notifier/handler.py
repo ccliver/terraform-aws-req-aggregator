@@ -1,14 +1,13 @@
 """Notifier Lambda handler.
 
 Triggered by EventBridge cron, 30 minutes after the Orchestrator.
-Queries the DynamoDB `jobs` table for postings discovered in the last N
-minutes and sends a single SES email digest to the configured recipient.
+Queries the DynamoDB `jobs` table for postings not yet emailed and sends a
+single SES email digest to the configured recipient.
 
 Environment variables expected:
     JOBS_TABLE          - DynamoDB table name for job postings
     SES_FROM_ADDRESS    - Verified SES sender email address
     SES_TO_ADDRESS      - Recipient email address
-    LOOKBACK_MINUTES    - How far back to query for new jobs (default: 60)
     SES_REGION          - AWS region for SES (defaults to us-east-1)
 """
 
@@ -16,38 +15,58 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from html import escape
 from typing import Any
 from urllib.parse import quote_plus
 
 import boto3
 from aws_lambda_powertools import Logger
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 logger = Logger(service="notifier")
 
 dynamodb = boto3.resource("dynamodb")
 
 
-def _query_recent_jobs(table: Any, lookback_minutes: int) -> list[dict[str, Any]]:
-    """Scan jobs table for items discovered within the lookback window.
+def _query_pending_jobs(table: Any) -> list[dict[str, Any]]:
+    """Query the pending-digest-index GSI for jobs not yet emailed.
 
-    TODO: add a GSI on discovered_at for efficient time-range queries
-    instead of a full table scan.
+    The GSI is sparse: `digest_pending` only exists on jobs whose
+    `sent_in_digest` is still False, so this Query never has to look at
+    already-sent jobs regardless of how large the table grows.
 
     Args:
         table: boto3 DynamoDB Table resource.
-        lookback_minutes: Number of minutes to look back.
 
     Returns:
         List of job item dicts.
     """
-    cutoff = (datetime.now(UTC) - timedelta(minutes=lookback_minutes)).isoformat()
-    response = table.scan(
-        FilterExpression=Attr("discovered_at").gte(cutoff),
+    response = table.query(
+        IndexName="pending-digest-index",
+        KeyConditionExpression=Key("digest_pending").eq("pending"),
     )
     return response.get("Items", [])
+
+
+def _mark_jobs_sent(table: Any, jobs: list[dict[str, Any]]) -> None:
+    """Flip sent_in_digest and drop digest_pending for each emailed job.
+
+    Removing digest_pending (rather than just setting it falsy) is what
+    drops the item out of the sparse pending-digest-index GSI. Best-effort
+    per item: a failure here just means that one job gets re-included in
+    the next digest rather than the whole run failing.
+    """
+    for job in jobs:
+        try:
+            table.update_item(
+                Key={"job_id": job["job_id"]},
+                UpdateExpression="REMOVE digest_pending SET sent_in_digest = :true",
+                ExpressionAttributeValues={":true": True},
+            )
+        except ClientError:
+            logger.warning("Failed to mark job sent", job_id=job["job_id"])
 
 
 def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
@@ -164,14 +183,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     jobs_table_name = os.environ["JOBS_TABLE"]
     from_address = os.environ["SES_FROM_ADDRESS"]
     to_address = os.environ["SES_TO_ADDRESS"]
-    lookback_minutes = int(os.environ.get("LOOKBACK_MINUTES", "60"))
     ses_region = os.environ.get("SES_REGION", "us-east-1")
 
     table = dynamodb.Table(jobs_table_name)
-    jobs = _query_recent_jobs(table, lookback_minutes)
+    jobs = _query_pending_jobs(table)
 
     if not jobs:
-        logger.info("No new jobs found", lookback_minutes=lookback_minutes)
+        logger.info("No new jobs found")
         return {"jobs_emailed": 0}
 
     ses = boto3.client("ses", region_name=ses_region)
@@ -188,6 +206,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             },
         },
     )
+
+    _mark_jobs_sent(table, jobs)
 
     logger.info("Sent digest", job_count=len(jobs), recipient=to_address)
     return {"jobs_emailed": len(jobs)}

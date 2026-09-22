@@ -71,6 +71,7 @@ cd examples/complete && terraform init && terraform plan   # exercises the modul
 - `worker/handler.py:_filter_relevant_jobs` also applies `_location_matches` (`LOCATION`/`WORK_TYPE` env vars, same default remote-only behavior) to every backend except `builtin`, which is exempt — detected via the per-job `"company"` key that only `_fetch_builtin_jobs` sets — since it's already filtered by its own independent `BUILTIN_LOCATION`/`BUILTIN_WORK_TYPE` config. The two settings are deliberately kept separate: the curated company list includes companies chosen for proximity to a future physical location, so a hybrid/on-site preference there shouldn't share Built In's "remote only" default. Both `_location_matches` and `_builtin_location_matches` delegate to the shared `_work_type_matches(location, location_env_var, work_type_env_var)`.
 - `worker/handler.py` has no config defaults of its own — `LOCATION`/`WORK_TYPE`/`BUILTIN_LOCATION`/`BUILTIN_WORK_TYPE`/`TITLE_KEYWORDS`/`EXCLUDE_TITLE_KEYWORDS`/`ALLOW_PUBLIC_TRUST`/`ALLOW_SECRET_CLEARANCE`/`ALLOW_TOP_SECRET_CLEARANCE` are all required env vars (plain `os.environ[...]`, not `.get(..., default)`), 12-factor-style — the actual default *values* live only in `variables.tf`, supplied by Terraform. `src/worker/tests/conftest.py` sets baseline values for these at module level so the test suite exercises realistic behavior without every test setting them individually; tests needing a different value still use `monkeypatch.setenv`.
 - `notifier/handler.py:_build_email_body` renders an HTML digest (styled, table-based for email-client compatibility) plus a plain-text fallback, both grouped by company with location shown. All interpolated values are HTML-escaped.
+- Dedup between the Worker and Notifier is state-based, not time-based: `worker/handler.py:handler` writes every new job with `sent_in_digest=False` and `digest_pending="pending"`; `notifier/handler.py:_query_pending_jobs` Queries the `pending-digest-index` GSI (hash key `digest_pending`, range key `discovered_at`) instead of scanning the table. The GSI is deliberately sparse — `digest_pending` only exists on unsent jobs — so the index never grows to include already-sent jobs regardless of table size, and `_mark_jobs_sent` (called after a successful SES send) `REMOVE`s `digest_pending` (rather than just setting it falsy) to drop each emailed job out of the index and flips `sent_in_digest` to `True`. This replaced an earlier `LOOKBACK_MINUTES`-based time-window Scan, which silently dropped jobs whose `discovered_at` write landed outside the window (e.g. after a Worker SQS retry) since nothing ever revisited them.
 - Lambda handlers return a summary dict (`{"published": n}` etc.) for easy CloudWatch Insights querying.
 
 ## Testing conventions
@@ -95,7 +96,6 @@ cd examples/complete && terraform init && terraform plan   # exercises the modul
 ## Open TODOs
 
 - `orchestrator/handler.py`: add DynamoDB scan pagination for large company lists.
-- `main.tf` jobs table: add GSI on `discovered_at` for efficient Notifier time-range queries (currently full table scan).
 
 ## CI
 

@@ -183,6 +183,8 @@ def test_handler_writes_new_jobs(mock_fetch, aws_resources: dict, lambda_context
     assert items[0]["location"] == "Remote"
     assert "discovered_at" in items[0]
     assert "clearance_review" not in items[0]
+    assert items[0]["sent_in_digest"] is False
+    assert items[0]["digest_pending"] == "pending"
 
 
 @patch("worker.handler._fetch_jobs")
