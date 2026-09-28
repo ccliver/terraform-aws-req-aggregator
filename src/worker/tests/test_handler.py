@@ -183,6 +183,7 @@ def test_handler_writes_new_jobs(mock_fetch, aws_resources: dict, lambda_context
     assert items[0]["location"] == "Remote"
     assert "discovered_at" in items[0]
     assert "clearance_review" not in items[0]
+    assert "clearance_tier" not in items[0]
     assert items[0]["sent_in_digest"] is False
     assert items[0]["digest_pending"] == "pending"
 
@@ -203,6 +204,24 @@ def test_handler_writes_clearance_review_flag(mock_fetch, aws_resources: dict, l
 
     items = aws_resources["table"].scan()["Items"]
     assert items[0]["clearance_review"] is True
+
+
+@patch("worker.handler._fetch_jobs")
+def test_handler_writes_clearance_tier(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should persist clearance_tier for a job flagged by the fetcher with a known tier."""
+    mock_fetch.return_value = [
+        {
+            "title": "Cloud Engineer",
+            "url": "https://acme.com/jobs/1",
+            "location": "Remote",
+            "clearance_tier": "public_trust",
+        },
+    ]
+
+    handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
+
+    items = aws_resources["table"].scan()["Items"]
+    assert items[0]["clearance_tier"] == "public_trust"
 
 
 @patch("worker.handler._fetch_jobs")
@@ -431,6 +450,7 @@ def test_fetch_greenhouse_jobs_allows_public_trust_description(mock_get) -> None
     jobs = _fetch_greenhouse_jobs("https://boards-api.greenhouse.io/v1/boards/acme/jobs")
 
     assert [j["title"] for j in jobs] == ["Cloud Engineer"]
+    assert jobs[0]["clearance_tier"] == "public_trust"
 
 
 @patch("worker.handler.requests.get")
@@ -536,6 +556,18 @@ def test_fetch_lever_jobs_flags_ambiguous_clearance_for_review(mock_get) -> None
 
     assert len(jobs) == 1
     assert jobs[0]["clearance_review"] is True
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_lever_jobs_tags_public_trust_title(mock_get) -> None:
+    """_fetch_lever_jobs should keep, and tag, a posting whose title requires Public Trust."""
+    mock_get.return_value.json.return_value = [_lever_posting("Cloud Engineer (Public Trust)")]
+    mock_get.return_value.raise_for_status.return_value = None
+
+    jobs = _fetch_lever_jobs("https://api.lever.co/v0/postings/acme")
+
+    assert len(jobs) == 1
+    assert jobs[0]["clearance_tier"] == "public_trust"
 
 
 # --- _fetch_workday_jobs unit tests ---
@@ -707,6 +739,7 @@ def test_fetch_workday_jobs_allows_public_trust_description(mock_post, mock_get)
     jobs = _fetch_workday_jobs("https://acme.wd1.myworkdayjobs.com/acme-careers")
 
     assert len(jobs) == 1
+    assert jobs[0]["clearance_tier"] == "public_trust"
 
 
 @patch("worker.handler.requests.get")
@@ -1112,6 +1145,7 @@ def test_fetch_builtin_jobs_allows_public_trust_description(mock_get, aws_resour
     jobs = _fetch_builtin_jobs("https://builtin.com/jobs?search=AWS")
 
     assert len(jobs) == 1
+    assert jobs[0]["clearance_tier"] == "public_trust"
 
 
 @patch("worker.handler.requests.get")
@@ -1421,6 +1455,7 @@ def test_fetch_oracle_jobs_allows_public_trust_description(mock_get) -> None:
     jobs = _fetch_oracle_jobs(_ORACLE_CAREERS_URL)
 
     assert len(jobs) == 1
+    assert jobs[0]["clearance_tier"] == "public_trust"
 
 
 @patch("worker.handler.requests.get")
@@ -1705,7 +1740,7 @@ def test_filter_empty_input_returns_empty() -> None:
 def test_clearance_decision_excludes_top_secret_by_default(text: str) -> None:
     """_clearance_decision should exclude Top-Secret-tier text under the default ALLOW_* env vars,
     including hyphenated phrasing (e.g. "Top-Secret", the grammatically standard compound-modifier form)."""
-    assert _clearance_decision(text) == (True, False)
+    assert _clearance_decision(text) == (True, False, "top_secret")
 
 
 def test_clearance_decision_hyphenated_top_secret_excluded_even_when_secret_allowed(
@@ -1718,7 +1753,7 @@ def test_clearance_decision_hyphenated_top_secret_excluded_even_when_secret_allo
     the text immediately following the hyphen — misclassifying a Top Secret requirement as Secret."""
     monkeypatch.setenv("ALLOW_SECRET_CLEARANCE", "true")
     text = "Must have an active Top-Secret clearance; SCI preferred with a willingness to sit for a poly"
-    assert _clearance_decision(text) == (True, False)
+    assert _clearance_decision(text) == (True, False, "top_secret")
 
 
 @pytest.mark.parametrize(
@@ -1732,7 +1767,7 @@ def test_clearance_decision_hyphenated_top_secret_excluded_even_when_secret_allo
 )
 def test_clearance_decision_excludes_secret_by_default(text: str) -> None:
     """_clearance_decision should exclude Secret-tier text under the default ALLOW_SECRET_CLEARANCE=false."""
-    assert _clearance_decision(text) == (True, False)
+    assert _clearance_decision(text) == (True, False, "secret")
 
 
 @pytest.mark.parametrize(
@@ -1746,18 +1781,18 @@ def test_clearance_decision_allows_secret_when_enabled(text: str, monkeypatch: p
     """Secret is less invasive than Top Secret (no polygraph/friends-family interviews) — should be
     keepable independently of the Top Secret tier once ALLOW_SECRET_CLEARANCE is true."""
     monkeypatch.setenv("ALLOW_SECRET_CLEARANCE", "true")
-    assert _clearance_decision(text) == (False, False)
+    assert _clearance_decision(text) == (False, False, "secret")
 
 
 def test_clearance_decision_top_secret_wins_over_secret_substring() -> None:
     """ "Top Secret clearance" also contains the substring "secret clearance" — the higher tier must win."""
-    assert _clearance_decision("Requires an active Top Secret clearance.") == (True, False)
+    assert _clearance_decision("Requires an active Top Secret clearance.") == (True, False, "top_secret")
 
 
 def test_clearance_decision_top_secret_wins_over_public_trust_mention() -> None:
     """A posting mentioning both Public Trust and a higher tier should still be excluded as Top Secret."""
     text = "Public Trust for some roles; this position requires an active Top Secret clearance."
-    assert _clearance_decision(text) == (True, False)
+    assert _clearance_decision(text) == (True, False, "top_secret")
 
 
 @pytest.mark.parametrize(
@@ -1769,13 +1804,13 @@ def test_clearance_decision_top_secret_wins_over_public_trust_mention() -> None:
 )
 def test_clearance_decision_allows_public_trust_by_default(text: str) -> None:
     """_clearance_decision should keep Public Trust text under the default ALLOW_PUBLIC_TRUST=true."""
-    assert _clearance_decision(text) == (False, False)
+    assert _clearance_decision(text) == (False, False, "public_trust")
 
 
 def test_clearance_decision_excludes_public_trust_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """_clearance_decision should exclude Public Trust text when ALLOW_PUBLIC_TRUST is false."""
     monkeypatch.setenv("ALLOW_PUBLIC_TRUST", "false")
-    assert _clearance_decision("This position requires a Public Trust clearance.") == (True, False)
+    assert _clearance_decision("This position requires a Public Trust clearance.") == (True, False, "public_trust")
 
 
 @pytest.mark.parametrize(
@@ -1787,7 +1822,7 @@ def test_clearance_decision_excludes_public_trust_when_disabled(monkeypatch: pyt
 )
 def test_clearance_decision_none_for_no_clearance_mention(text: str) -> None:
     """_clearance_decision should keep text with no clearance mention, or an explicit negation."""
-    assert _clearance_decision(text) == (False, False)
+    assert _clearance_decision(text) == (False, False, "none")
 
 
 @pytest.mark.parametrize(
@@ -1801,7 +1836,7 @@ def test_clearance_decision_none_for_no_clearance_mention(text: str) -> None:
 def test_clearance_decision_flags_ambiguous_mentions_for_review_by_default(text: str) -> None:
     """A generic/unspecified clearance mention (no level stated) can't be resolved from text alone —
     it shouldn't be excluded outright, but flagged for manual review instead."""
-    assert _clearance_decision(text) == (False, True)
+    assert _clearance_decision(text) == (False, True, "ambiguous")
 
 
 @pytest.mark.parametrize(
@@ -1817,7 +1852,7 @@ def test_clearance_decision_ambiguous_needs_no_review_once_every_tier_is_allowed
     """An ambiguous mention has nothing left to resolve once every tier is already allowed."""
     monkeypatch.setenv("ALLOW_SECRET_CLEARANCE", "true")
     monkeypatch.setenv("ALLOW_TOP_SECRET_CLEARANCE", "true")
-    assert _clearance_decision(text) == (False, False)
+    assert _clearance_decision(text) == (False, False, "ambiguous")
 
 
 def test_clearance_decision_ignores_eppa_boilerplate() -> None:
@@ -1830,14 +1865,14 @@ def test_clearance_decision_ignores_eppa_boilerplate() -> None:
         "Software Engineer. We are an equal opportunity employer. "
         "Employee Polygraph Protection Act (EPPA) Poster and other required notices apply."
     )
-    assert _clearance_decision(text) == (False, False)
+    assert _clearance_decision(text) == (False, False, "none")
 
 
 def test_clearance_decision_everything_allowed_never_excludes_or_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     """With every ALLOW_* tier true, even Top-Secret-tier text should be kept and not flagged for review."""
     monkeypatch.setenv("ALLOW_SECRET_CLEARANCE", "true")
     monkeypatch.setenv("ALLOW_TOP_SECRET_CLEARANCE", "true")
-    assert _clearance_decision("Must have an active Top Secret clearance.") == (False, False)
+    assert _clearance_decision("Must have an active Top Secret clearance.") == (False, False, "top_secret")
 
 
 # --- _is_non_us_location unit tests ---

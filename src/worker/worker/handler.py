@@ -251,10 +251,10 @@ def _clearance_tier(text: str) -> str:
     return "none"
 
 
-def _clearance_decision(text: str) -> tuple[bool, bool]:
+def _clearance_decision(text: str) -> tuple[bool, bool, str]:
     """Decide whether text's clearance requirement should exclude the posting.
 
-    Returns (excluded, needs_review):
+    Returns (excluded, needs_review, tier):
       - "top_secret"/"secret"/"public_trust": excluded is the inverse of
         that tier's ALLOW_* env var; the tier is known, so needs_review is
         always False.
@@ -265,17 +265,21 @@ def _clearance_decision(text: str) -> tuple[bool, bool]:
         tier is already allowed (_clearance_screening_needed() is False), in
         which case a review would be pointless.
       - "none": kept, no review needed.
+    tier is always the raw _clearance_tier(text) result, regardless of the
+    other two values — callers use it to label a kept posting's specific
+    clearance requirement (see clearance_tier on the job dict) rather than
+    just leaving the user to search the page for it.
     """
     tier = _clearance_tier(text)
     if tier == "top_secret":
-        return not _allow_top_secret_clearance(), False
+        return not _allow_top_secret_clearance(), False, tier
     if tier == "secret":
-        return not _allow_secret_clearance(), False
+        return not _allow_secret_clearance(), False, tier
     if tier == "public_trust":
-        return not _allow_public_trust(), False
+        return not _allow_public_trust(), False, tier
     if tier == "ambiguous":
-        return False, _clearance_screening_needed()
-    return False, False
+        return False, _clearance_screening_needed(), tier
+    return False, False, tier
 
 
 # Countries, business regions, and common offshore/nearshore tech-hub cities
@@ -546,8 +550,9 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
     Returns:
         Normalised list of job dicts with title, url, location keys (plus
         clearance_review=True for jobs with an ambiguous clearance mention,
-        and salary when a pay range is found in the description — see
-        _extract_salary).
+        clearance_tier for a job with a known required tier (top_secret/
+        secret/public_trust), and salary when a pay range is found in the
+        description — see _extract_salary).
     """
     try:
         resp = requests.get(careers_url, params={"content": "true"}, timeout=30)
@@ -571,7 +576,7 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
     for posting in data.get("jobs", []):
         title = posting.get("title", "")
         content = posting.get("content", "")
-        excluded, needs_review = _clearance_decision(f"{title} {content}")
+        excluded, needs_review, tier = _clearance_decision(f"{title} {content}")
         if excluded:
             clearance_skipped += 1
             continue
@@ -582,6 +587,8 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
         }
         if needs_review:
             job["clearance_review"] = True
+        if tier in ("top_secret", "secret", "public_trust"):
+            job["clearance_tier"] = tier
         salary = _extract_salary(_plain_text(content))
         if salary:
             job["salary"] = salary
@@ -602,7 +609,9 @@ def _fetch_lever_jobs(careers_url: str) -> list[dict[str, Any]]:
 
     Returns:
         Normalised list of job dicts with title, url, location keys (plus
-        clearance_review=True for jobs with an ambiguous clearance mention).
+        clearance_review=True for jobs with an ambiguous clearance mention,
+        and clearance_tier for a job with a known required tier (top_secret/
+        secret/public_trust)).
     """
     try:
         resp = requests.get(careers_url, timeout=30)
@@ -625,7 +634,7 @@ def _fetch_lever_jobs(careers_url: str) -> list[dict[str, Any]]:
     clearance_skipped = 0
     for posting in data:
         title = posting.get("text", "")
-        excluded, needs_review = _clearance_decision(title)
+        excluded, needs_review, tier = _clearance_decision(title)
         if excluded:
             clearance_skipped += 1
             continue
@@ -636,6 +645,8 @@ def _fetch_lever_jobs(careers_url: str) -> list[dict[str, Any]]:
         }
         if needs_review:
             job["clearance_review"] = True
+        if tier in ("top_secret", "secret", "public_trust"):
+            job["clearance_tier"] = tier
         jobs.append(job)
     logger.info("Lever jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
     return jobs
@@ -690,8 +701,10 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
 
     Returns:
         Normalised list of job dicts with title, url, location keys (plus
-        clearance_review=True for an ambiguous clearance mention, and salary
-        when a pay range is found in the description).
+        clearance_review=True for an ambiguous clearance mention,
+        clearance_tier for a known required tier (top_secret/secret/
+        public_trust), and salary when a pay range is found in the
+        description).
     """
     match = _WORKDAY_URL_RE.match(careers_url)
     if not match:
@@ -739,7 +752,7 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
                     continue
                 seen_paths.add(external_path)
                 description = _fetch_workday_job_description(tenant, wd, site, external_path)
-                excluded, needs_review = _clearance_decision(f"{title} {description}")
+                excluded, needs_review, tier = _clearance_decision(f"{title} {description}")
                 if excluded:
                     clearance_skipped += 1
                     continue
@@ -750,6 +763,8 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
                 }
                 if needs_review:
                     job["clearance_review"] = True
+                if tier in ("top_secret", "secret", "public_trust"):
+                    job["clearance_tier"] = tier
                 salary = _extract_salary(_plain_text(description))
                 if salary:
                     job["salary"] = salary
@@ -942,7 +957,8 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
     Returns:
         Normalised list of job dicts with title, url, location, and company
         keys (plus clearance_review=True for an ambiguous clearance mention,
-        and salary when a pay range is found).
+        clearance_tier for a known required tier (top_secret/secret/
+        public_trust), and salary when a pay range is found).
     """
     known_companies = _get_known_company_names()
 
@@ -993,7 +1009,7 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
             href = title_el.get("href", "")
             job_url = _BUILTIN_BASE_URL + (href if isinstance(href, str) else "")
             description, ld_json_salary = _fetch_builtin_job_description(job_url)
-            excluded, needs_review = _clearance_decision(f"{title} {description}")
+            excluded, needs_review, tier = _clearance_decision(f"{title} {description}")
             if excluded:
                 clearance_skipped += 1
                 continue
@@ -1005,6 +1021,8 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
             }
             if needs_review:
                 job["clearance_review"] = True
+            if tier in ("top_secret", "secret", "public_trust"):
+                job["clearance_tier"] = tier
             salary = ld_json_salary or _extract_salary(description)
             if salary:
                 job["salary"] = salary
@@ -1041,8 +1059,9 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
     Returns:
         Normalised list of job dicts with title, url, location keys (plus
         clearance_review=True for jobs with an ambiguous clearance mention,
-        and salary when a pay range is found in the description — see
-        _extract_salary).
+        clearance_tier for a known required tier (top_secret/secret/
+        public_trust), and salary when a pay range is found in the
+        description — see _extract_salary).
     """
     match = _ORACLE_URL_RE.match(careers_url)
     if not match:
@@ -1096,7 +1115,7 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
                     continue
                 seen_ids.add(job_id)
                 description = posting.get("ShortDescriptionStr") or ""
-                excluded, needs_review = _clearance_decision(f"{title} {description}")
+                excluded, needs_review, tier = _clearance_decision(f"{title} {description}")
                 if excluded:
                     clearance_skipped += 1
                     continue
@@ -1107,6 +1126,8 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
                 }
                 if needs_review:
                     job["clearance_review"] = True
+                if tier in ("top_secret", "secret", "public_trust"):
+                    job["clearance_tier"] = tier
                 salary = _extract_salary(_plain_text(description))
                 if salary:
                     job["salary"] = salary
@@ -1197,6 +1218,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             }
             if job.get("clearance_review"):
                 item["clearance_review"] = True
+            if job.get("clearance_tier"):
+                item["clearance_tier"] = job["clearance_tier"]
             if job.get("salary"):
                 item["salary"] = job["salary"]
             # condition_expression prevents overwriting existing items

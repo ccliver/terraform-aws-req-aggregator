@@ -145,6 +145,40 @@ def test_build_email_body_omits_clearance_flag_when_not_set() -> None:
     assert "CLEARANCE" not in html
 
 
+@pytest.mark.parametrize(
+    ("tier", "label"),
+    [
+        ("top_secret", "TOP SECRET"),
+        ("secret", "SECRET"),
+        ("public_trust", "PUBLIC TRUST"),
+    ],
+)
+def test_build_email_body_shows_clearance_tier_badge(tier: str, label: str) -> None:
+    """Email body should show the specific clearance level for a job with a known clearance_tier."""
+    jobs = [
+        {
+            "title": "Cloud Engineer",
+            "company": "Acme",
+            "url": "https://acme.com/1",
+            "location": "Remote",
+            "clearance_tier": tier,
+        }
+    ]
+    text, html = _build_email_body(jobs)
+
+    assert f"[{label} CLEARANCE]" in text
+    assert f"{label} CLEARANCE" in html
+
+
+def test_build_email_body_omits_clearance_tier_badge_when_not_set() -> None:
+    """Email body should not render a clearance_tier badge for a job without that field."""
+    jobs = [{"title": "Cloud Engineer", "company": "Acme", "url": "https://acme.com/1", "location": "Remote"}]
+    text, html = _build_email_body(jobs)
+
+    assert "CLEARANCE" not in text
+    assert "CLEARANCE" not in html
+
+
 def test_build_email_body_includes_salary_when_present() -> None:
     """Email body should render a job's salary when the worker found one."""
     jobs = [

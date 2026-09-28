@@ -29,6 +29,17 @@ logger = Logger(service="notifier")
 
 dynamodb = boto3.resource("dynamodb")
 
+# Display labels for worker/handler.py's _clearance_tier values, for the
+# clearance_tier badge in _build_email_body. Only the three tiers a job can
+# actually be kept under appear here — "ambiguous" is rendered via the
+# separate clearance_review "CLEARANCE UNCLEAR" badge instead, and "none"
+# gets no badge at all.
+_CLEARANCE_TIER_LABELS = {
+    "top_secret": "TOP SECRET",
+    "secret": "SECRET",
+    "public_trust": "PUBLIC TRUST",
+}
+
 
 def _query_pending_jobs(table: Any) -> list[dict[str, Any]]:
     """Query the pending-digest-index GSI for jobs not yet emailed.
@@ -75,10 +86,14 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
     A job with clearance_review=True (set by the worker for a posting whose
     clearance requirement was ambiguous/unspecified — see worker/handler.py's
     _clearance_decision) is still included, but marked with a review note
-    rather than silently guessed at. A job's salary (set by the worker's
-    _extract_salary when a posting's description contains a pay range) is
-    rendered as a badge/suffix next to the title when present; omitted
-    entirely otherwise, since most postings don't include one.
+    rather than silently guessed at. A job with a known clearance_tier
+    (top_secret/secret/public_trust — a posting that was kept because its
+    tier's ALLOW_* env var allows it) gets a badge naming that tier, so the
+    required level is visible without opening the posting. A job's salary
+    (set by the worker's _extract_salary when a posting's description
+    contains a pay range) is rendered as a badge/suffix next to the title
+    when present; omitted entirely otherwise, since most postings don't
+    include one.
 
     Returns:
         Tuple of (text_body, html_body).
@@ -100,13 +115,16 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
         for job in company_jobs:
             location = job.get("location", "").strip()
             needs_review = bool(job.get("clearance_review"))
+            tier_label = _CLEARANCE_TIER_LABELS.get(job.get("clearance_tier", ""))
             salary = job.get("salary", "").strip()
             review_suffix = " [CLEARANCE UNCLEAR - PLEASE VERIFY]" if needs_review else ""
+            tier_suffix = f" [{tier_label} CLEARANCE]" if tier_label else ""
             salary_suffix = f" [{salary}]" if salary else ""
             text_lines.append(
                 f"  - {job['title']}"
                 + (f" ({location})" if location else "")
                 + salary_suffix
+                + tier_suffix
                 + review_suffix
                 + f"\n    {job['url']}"
             )
@@ -120,6 +138,13 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
                 if salary
                 else ""
             )
+            tier_badge = (
+                '<span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:4px;'
+                'background-color:#f8d7da;color:#721c24;font-size:11px;font-weight:600;">'
+                f"{escape(tier_label)} CLEARANCE</span>"
+                if tier_label
+                else ""
+            )
             review_badge = (
                 '<span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:4px;'
                 'background-color:#fff3cd;color:#856404;font-size:11px;font-weight:600;">'
@@ -131,7 +156,7 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
                 f'<div style="padding:12px 0;border-bottom:1px solid #eeeef2;">'
                 f'<a href="{escape(job["url"])}" '
                 f'style="font-size:15px;font-weight:600;color:#3454d1;text-decoration:none;">'
-                f"{escape(job['title'])}</a>{salary_badge}{review_badge}{location_html}</div>"
+                f"{escape(job['title'])}</a>{salary_badge}{tier_badge}{review_badge}{location_html}</div>"
             )
 
         glassdoor_url = f"https://www.glassdoor.com/Search/results.htm?keyword={quote_plus(company)}"
