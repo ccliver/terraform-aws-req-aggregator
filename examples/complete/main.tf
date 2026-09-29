@@ -33,7 +33,7 @@ module "req_aggregator" {
 
   # --- Application tracking API (off by default) ---
   # Adds an API Gateway HTTP API + dedicated "tracker" Lambda for recording
-  # date_applied/salary_range/source/status/response_date/notes against jobs
+  # date_applied/status/response_date/notes against jobs
   # already in the table. Every route requires AWS_IAM (SigV4) auth
   # See the "Application Tracking" section in the README.
   enable_tracking_api = false

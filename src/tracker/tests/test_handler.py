@@ -190,7 +190,7 @@ def test_patch_job_returns_404_for_unknown_job(aws_resources: dict, lambda_conte
     assert result["statusCode"] == 404
 
 
-@pytest.mark.parametrize("status", ["applied", "interviewing", "rejected", "offer"])
+@pytest.mark.parametrize("status", ["not_applied", "applied", "interviewing", "rejected", "offer"])
 def test_patch_job_accepts_every_valid_status(aws_resources: dict, lambda_context, status: str) -> None:
     """PATCH /jobs/{job_id} should accept every value in the status enum."""
     aws_resources["table"].put_item(Item=_job("job-1"))
@@ -198,3 +198,65 @@ def test_patch_job_accepts_every_valid_status(aws_resources: dict, lambda_contex
     result = handler(_event("PATCH", "/jobs/job-1", body={"status": status}), lambda_context)
 
     assert result["statusCode"] == 200
+
+
+def test_get_job_defaults_missing_status_to_not_applied(aws_resources: dict, lambda_context) -> None:
+    """GET /jobs/{job_id} should report status="not_applied" for a job the Worker wrote with no status attribute."""
+    aws_resources["table"].put_item(Item=_job("job-1"))
+
+    result = handler(_event("GET", "/jobs/job-1"), lambda_context)
+
+    body = json.loads(result["body"])
+    assert body["status"] == "not_applied"
+    # The DynamoDB item itself is untouched — this is a response-shaping default, not a write.
+    item = aws_resources["table"].get_item(Key={"job_id": "job-1"})["Item"]
+    assert "status" not in item
+
+
+def test_list_jobs_defaults_missing_status_to_not_applied(aws_resources: dict, lambda_context) -> None:
+    """GET /jobs should report status="not_applied" for every job with no status attribute."""
+    aws_resources["table"].put_item(Item=_job("job-1"))
+
+    result = handler(_event("GET", "/jobs"), lambda_context)
+
+    body = json.loads(result["body"])
+    assert body["jobs"][0]["status"] == "not_applied"
+
+
+def test_list_jobs_filters_by_not_applied_includes_untouched_jobs(aws_resources: dict, lambda_context) -> None:
+    """GET /jobs?status=not_applied should match jobs with no status attribute, not just an explicit "not_applied"."""
+    aws_resources["table"].put_item(Item=_job("job-untouched"))
+    aws_resources["table"].put_item(Item=_job("job-explicit", status="not_applied"))
+    aws_resources["table"].put_item(Item=_job("job-applied", status="applied"))
+
+    result = handler(_event("GET", "/jobs", query={"status": "not_applied"}), lambda_context)
+
+    body = json.loads(result["body"])
+    assert body["count"] == 2
+    assert {j["job_id"] for j in body["jobs"]} == {"job-untouched", "job-explicit"}
+
+
+def test_list_jobs_filters_by_applied_excludes_untouched_jobs(aws_resources: dict, lambda_context) -> None:
+    """GET /jobs?status=applied should not match jobs with no status attribute at all."""
+    aws_resources["table"].put_item(Item=_job("job-untouched"))
+    aws_resources["table"].put_item(Item=_job("job-applied", status="applied"))
+
+    result = handler(_event("GET", "/jobs", query={"status": "applied"}), lambda_context)
+
+    body = json.loads(result["body"])
+    assert body["count"] == 1
+    assert body["jobs"][0]["job_id"] == "job-applied"
+
+
+def test_patch_job_defaults_missing_status_in_response_when_not_touched(aws_resources: dict, lambda_context) -> None:
+    """PATCH updating only notes on an untouched job should still report status="not_applied" in the response."""
+    aws_resources["table"].put_item(Item=_job("job-1"))
+
+    result = handler(_event("PATCH", "/jobs/job-1", body={"notes": "Following up"}), lambda_context)
+
+    body = json.loads(result["body"])
+    assert result["statusCode"] == 200
+    assert body["status"] == "not_applied"
+    # Still not actually written to the item — only the response defaults it.
+    item = aws_resources["table"].get_item(Key={"job_id": "job-1"})["Item"]
+    assert "status" not in item

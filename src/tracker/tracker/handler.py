@@ -34,13 +34,37 @@ dynamodb = boto3.resource("dynamodb")
 
 # The only job-item fields PATCH is allowed to touch — everything else on the
 # item (company, title, url, location, discovered_at, clearance_*, etc.) is
-# written once by the Worker Lambda and is read-only from this API.
-_UPDATABLE_FIELDS = {"date_applied", "salary_range", "source", "status", "response_date", "notes"}
-_STATUS_VALUES = {"applied", "interviewing", "rejected", "offer"}
+# written once by the Worker Lambda and is read-only from this API. Salary is
+# deliberately not here: it's a single field the Worker already auto-extracts
+# from the posting (see worker/handler.py:_extract_salary) — there's no
+# separate user-entered salary concept to track.
+_UPDATABLE_FIELDS = {"date_applied", "status", "response_date", "notes"}
+_STATUS_VALUES = {"not_applied", "applied", "interviewing", "rejected", "offer"}
+# The Worker never sets status — it's tracker-only, so a freshly-scraped job
+# has no status attribute at all. Every response path here (list_jobs,
+# get_job, update_job) treats that absence as this value rather than leaving
+# it out of the JSON response, so a job is never in some fifth, unnamed state
+# only some API responses show — see _status_condition for why list_jobs's
+# ?status=not_applied filter has to agree with that same default.
+_DEFAULT_STATUS = "not_applied"
 
 
 def _table() -> Any:
     return dynamodb.Table(os.environ["JOBS_TABLE"])
+
+
+def _status_condition(status: str) -> Any:
+    """Build the FilterExpression condition for a requested status.
+
+    Matches the attribute exactly, except for _DEFAULT_STATUS: since a job
+    with no status attribute at all is treated as _DEFAULT_STATUS in every
+    response (see the module docstring note), a plain equality check would
+    miss every job that's never been touched — attribute_not_exists is
+    OR'd in so ?status=not_applied actually returns them.
+    """
+    if status == _DEFAULT_STATUS:
+        return Attr("status").eq(status) | Attr("status").not_exists()
+    return Attr("status").eq(status)
 
 
 @app.get("/jobs")
@@ -68,7 +92,7 @@ def list_jobs() -> dict[str, Any]:
 
     filter_expression = None
     for condition in (
-        Attr("status").eq(status) if status is not None else None,
+        _status_condition(status) if status is not None else None,
         Attr("discovered_at").gte(discovered_after) if discovered_after is not None else None,
         Attr("discovered_at").lte(discovered_before) if discovered_before is not None else None,
     ):
@@ -88,6 +112,9 @@ def list_jobs() -> dict[str, Any]:
         response = table.scan(**scan_kwargs, ExclusiveStartKey=response["LastEvaluatedKey"])
         items.extend(response.get("Items", []))
 
+    for item in items:
+        item.setdefault("status", _DEFAULT_STATUS)
+
     return {"jobs": items, "count": len(items)}
 
 
@@ -104,6 +131,7 @@ def get_job(job_id: str) -> dict[str, Any]:
     item = _table().get_item(Key={"job_id": job_id}).get("Item")
     if item is None:
         raise NotFoundError(f"Job {job_id} not found")
+    item.setdefault("status", _DEFAULT_STATUS)
     return item
 
 
@@ -150,8 +178,10 @@ def update_job(job_id: str) -> dict[str, Any]:
     except dynamodb.meta.client.exceptions.ConditionalCheckFailedException as exc:
         raise NotFoundError(f"Job {job_id} not found") from exc
 
+    attributes = response["Attributes"]
+    attributes.setdefault("status", _DEFAULT_STATUS)
     logger.info("Updated job", job_id=job_id, fields=sorted(body))
-    return response["Attributes"]
+    return attributes
 
 
 @logger.inject_lambda_context

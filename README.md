@@ -49,9 +49,9 @@ An optional HTTP API (`enable_tracking_api`, defaults to `false`) records what h
 | --- | --- | --- |
 | `GET` | `/jobs` | List/filter jobs — optional `status`, `discovered_after`, `discovered_before` (bounds on `discovered_at`) query params |
 | `GET` | `/jobs/{job_id}` | Fetch a single job |
-| `PATCH` | `/jobs/{job_id}` | Partially update `date_applied`, `salary_range`, `source`, `status`, `response_date`, and/or `notes` |
+| `PATCH` | `/jobs/{job_id}` | Partially update `date_applied`, `status`, `response_date`, and/or `notes` |
 
-`PATCH` rejects any field outside that list, and rejects a `status` outside `applied`/`interviewing`/`rejected`/`offer`, both with `400`. An unknown `job_id` returns `404` on every route. See `tracker/handler.py`.
+`PATCH` rejects any field outside that list, and rejects a `status` outside `not_applied`/`applied`/`interviewing`/`rejected`/`offer`, both with `400`. `GET` responses always report a real `status` — a job the Worker wrote but nobody's touched yet reports `not_applied` rather than omitting the field, and `GET /jobs?status=not_applied` matches those untouched jobs too, not just ones explicitly set to it. An unknown `job_id` returns `404` on every route. See `tracker/handler.py`.
 
 ## DynamoDB Tables
 
@@ -71,7 +71,8 @@ An optional HTTP API (`enable_tracking_api`, defaults to `false`) records what h
 | url           | S    | Job posting URL |
 | location      | S    | Location string |
 | discovered_at | S    | ISO-8601 timestamp |
-| date_applied<br>salary_range<br>source<br>status<br>response_date<br>notes | S | Set only via the [application-tracking API](#application-tracking) (`enable_tracking_api`); absent until a `PATCH /jobs/{job_id}` sets them |
+| salary        | S    | Pay range auto-detected from the posting text (`worker/handler.py:_extract_salary`); absent if none found — this is the only salary field, there's no separate user-entered one |
+| date_applied<br>status<br>response_date<br>notes | S | Set only via the [application-tracking API](#application-tracking) (`enable_tracking_api`); absent until a `PATCH /jobs/{job_id}` sets them |
 
 ## Local Development
 
@@ -201,7 +202,7 @@ Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/doc
 | <a name="input_cost_allocation_tag_values"></a> [cost\_allocation\_tag\_values](#input\_cost\_allocation\_tag\_values) | Cost allocation tag values to filter Cost Explorer by. Defaults to [var.prefix] when null, matching the common default\_tags pattern of tagging every resource with the module's prefix (e.g. Project = local.prefix). Only used when enable\_cost\_widget is true. | `list(string)` | `null` | no |
 | <a name="input_enable_cost_widget"></a> [enable\_cost\_widget](#input\_enable\_cost\_widget) | Whether to add a Cost Explorer widget (via the ccliver/cw-cost-widget/aws module) to the observability dashboard. Defaults to false (unlike enable\_dashboard) because it requires a one-time manual step outside Terraform — activating cost\_allocation\_tag\_key as a Cost Allocation Tag in AWS Billing — and shows no data until that's done and Cost Explorer has accrued cost from activation forward. Has no effect when enable\_dashboard is false. | `bool` | `false` | no |
 | <a name="input_enable_dashboard"></a> [enable\_dashboard](#input\_enable\_dashboard) | Whether to create the CloudWatch observability dashboard. It's built entirely from standard AWS-published metrics and Logs Insights queries (no custom metrics), so it costs nothing beyond the free tier when unused — this exists to avoid spending one of the 3 free dashboards/account on it for module users who don't want it | `bool` | `true` | no |
-| <a name="input_enable_tracking_api"></a> [enable\_tracking\_api](#input\_enable\_tracking\_api) | Whether to create the application-tracking API: an API Gateway HTTP API (not REST) plus a dedicated tracker Lambda, both created only when true. Every route requires AWS\_IAM authorization (no custom authorizer). The Lambda has read/write access to the existing jobs table only (no companies table access) and extends its item schema in place — date\_applied, salary\_range, source, status, response\_date, notes — no new table. Defaults to false, matching the enable\_dashboard/enable\_cost\_widget optional-feature pattern. | `bool` | `false` | no |
+| <a name="input_enable_tracking_api"></a> [enable\_tracking\_api](#input\_enable\_tracking\_api) | Whether to create the application-tracking API: an API Gateway HTTP API (not REST) plus a dedicated tracker Lambda, both created only when true. Every route requires AWS\_IAM authorization (no custom authorizer). The Lambda has read/write access to the existing jobs table only (no companies table access) and extends its item schema in place — date\_applied, status, response\_date, notes — no new table. Defaults to false, matching the enable\_dashboard/enable\_cost\_widget optional-feature pattern. | `bool` | `false` | no |
 | <a name="input_exclude_title_keywords"></a> [exclude\_title\_keywords](#input\_exclude\_title\_keywords) | Comma-separated title substrings (OR'd together, case-insensitive); a title matching any of these is dropped even if it also matched title\_keywords | `string` | `"manager,director"` | no |
 | <a name="input_lambda_memory_mb"></a> [lambda\_memory\_mb](#input\_lambda\_memory\_mb) | Lambda function memory in MB (orchestrator and notifier) | `number` | `512` | no |
 | <a name="input_lambda_timeout_seconds"></a> [lambda\_timeout\_seconds](#input\_lambda\_timeout\_seconds) | Lambda function timeout in seconds | `number` | `300` | no |

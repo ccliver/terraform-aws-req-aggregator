@@ -28,5 +28,9 @@ build/
 # Real curated company list (companies.json in the repo is a generic example)
 companies/*.local.json
 
+# Streamlit secrets (examples/streamlit/README.md has you create this locally
+# for your own API_URL — matches at any depth, same as the Terraform patterns above)
+secrets.toml
+
 *.swp
 *.log

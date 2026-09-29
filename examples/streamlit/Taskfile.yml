@@ -1,0 +1,46 @@
+# Requires https://taskfile.dev (`brew install go-task` or see the site for
+# other install methods).
+#
+# Usage:
+#   task run                                   # reads ../complete's Terraform output
+#   task run TF_DIR=/path/to/your/config-repo  # reads a different deployment's output
+#             (e.g. the separate repo that holds your real, non-example variable values)
+version: "3"
+
+vars:
+  TF_DIR: '{{.TF_DIR | default "../complete"}}'
+
+tasks:
+  default:
+    desc: Alias for "run"
+    cmds:
+      - task: run
+
+  venv:
+    desc: Create a local virtualenv and install requirements.txt into it
+    internal: true
+    status:
+      - test -f .venv/bin/streamlit
+    cmds:
+      - python3 -m venv .venv
+      - .venv/bin/pip install --quiet --upgrade pip
+      - .venv/bin/pip install --quiet -r requirements.txt
+
+  run:
+    desc: Launch the Streamlit job tracker, pre-filled with the deployed tracking API's invoke URL
+    summary: |
+      Reads the `tracking_api_invoke_url` Terraform output from TF_DIR (default:
+      ../complete) and launches the app with it pre-filled via the API_URL env var.
+
+      Requires TF_DIR to be a Terraform working directory that's already been applied
+      with enable_tracking_api = true (`terraform -chdir=TF_DIR apply`), since this
+      only reads existing state — it doesn't run apply itself.
+    deps:
+      - venv
+    vars:
+      INVOKE_URL:
+        sh: terraform -chdir={{.TF_DIR}} output -raw tracking_api_invoke_url
+    env:
+      API_URL: "{{.INVOKE_URL}}"
+    cmds:
+      - .venv/bin/streamlit run app.py
