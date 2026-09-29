@@ -147,7 +147,9 @@ def _caller_identity() -> str | None:
 
 
 def _jobs_to_dataframe(jobs: list[dict[str, Any]]) -> pd.DataFrame:
-    """Normalise a list of job dicts (heterogeneous keys — most tracking fields are set-once-touched) into a fixed-column table."""
+    """Normalise a list of job dicts (heterogeneous keys — most tracking fields are set-once-touched)
+    into a fixed-column table.
+    """
     df = pd.DataFrame(jobs)
     for col in ["job_id", *_DISPLAY_COLUMNS]:
         if col not in df.columns:
