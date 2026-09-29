@@ -398,33 +398,14 @@ resource "aws_apigatewayv2_api" "tracker" {
   protocol_type = "HTTP"
 }
 
-resource "aws_cloudwatch_log_group" "tracker_api_access" {
-  count = var.enable_tracking_api ? 1 : 0
-
-  name              = "/aws/apigateway/${local.prefix}-tracking-api"
-  retention_in_days = var.log_retention_days
-}
-
 resource "aws_apigatewayv2_stage" "tracker" {
   count = var.enable_tracking_api ? 1 : 0
 
+  # No access_log_settings — that needs an account/region-wide CloudWatch
+  # role this module doesn't manage (a singleton outside any one API's scope).
   api_id      = aws_apigatewayv2_api.tracker[0].id
   name        = "$default"
   auto_deploy = true
-
-  access_log_settings {
-    destination_arn = aws_cloudwatch_log_group.tracker_api_access[0].arn
-    format = jsonencode({
-      requestId      = "$context.requestId"
-      ip             = "$context.identity.sourceIp"
-      requestTime    = "$context.requestTime"
-      routeKey       = "$context.routeKey"
-      status         = "$context.status"
-      protocol       = "$context.protocol"
-      responseLength = "$context.responseLength"
-      integrationErr = "$context.integrationErrorMessage"
-    })
-  }
 }
 
 resource "aws_apigatewayv2_integration" "tracker" {
