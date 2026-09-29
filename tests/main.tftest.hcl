@@ -66,6 +66,68 @@ run "dashboard_omitted_when_disabled" {
   }
 }
 
+run "tracking_api_omitted_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(aws_apigatewayv2_api.tracker) == 0
+    error_message = "enable_tracking_api defaults to false, so no HTTP API should be planned"
+  }
+
+  assert {
+    condition     = length(aws_lambda_function.tracker) == 0
+    error_message = "enable_tracking_api defaults to false, so no tracker Lambda should be planned"
+  }
+
+  assert {
+    condition     = output.tracking_api_invoke_url == null
+    error_message = "tracking_api_invoke_url output should be null when the tracking API is disabled"
+  }
+
+  assert {
+    condition     = output.tracker_lambda_arn == null
+    error_message = "tracker_lambda_arn output should be null when the tracking API is disabled"
+  }
+}
+
+run "tracking_api_created_when_enabled" {
+  command = plan
+
+  variables {
+    enable_tracking_api = true
+  }
+
+  assert {
+    condition     = length(aws_apigatewayv2_api.tracker) == 1
+    error_message = "enable_tracking_api = true should plan exactly one HTTP API"
+  }
+
+  assert {
+    condition     = length(aws_apigatewayv2_route.tracker_list_jobs) == 1
+    error_message = "enable_tracking_api = true should plan the GET /jobs route"
+  }
+
+  assert {
+    condition     = aws_apigatewayv2_route.tracker_list_jobs[0].authorization_type == "AWS_IAM"
+    error_message = "Every tracking API route must require AWS_IAM authorization"
+  }
+
+  assert {
+    condition     = aws_apigatewayv2_route.tracker_get_job[0].authorization_type == "AWS_IAM"
+    error_message = "Every tracking API route must require AWS_IAM authorization"
+  }
+
+  assert {
+    condition     = aws_apigatewayv2_route.tracker_patch_job[0].authorization_type == "AWS_IAM"
+    error_message = "Every tracking API route must require AWS_IAM authorization"
+  }
+
+  assert {
+    condition     = aws_lambda_function.tracker[0].function_name == "req-aggregator-tracker"
+    error_message = "Tracker Lambda function name should be derived from the default prefix"
+  }
+}
+
 run "resources_use_custom_prefix" {
   command = plan
 

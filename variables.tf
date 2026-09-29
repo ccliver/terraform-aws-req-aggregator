@@ -155,3 +155,9 @@ variable "log_retention_days" {
   type        = number
   default     = 30
 }
+
+variable "enable_tracking_api" {
+  description = "Whether to create the application-tracking API: an API Gateway HTTP API (not REST) plus a dedicated tracker Lambda, both created only when true. Every route requires AWS_IAM authorization (no custom authorizer). The Lambda has read/write access to the existing jobs table only (no companies table access) and extends its item schema in place — date_applied, salary_range, source, status, response_date, notes — no new table. Defaults to false, matching the enable_dashboard/enable_cost_widget optional-feature pattern."
+  type        = bool
+  default     = false
+}

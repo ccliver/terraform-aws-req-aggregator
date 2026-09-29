@@ -1,5 +1,5 @@
 [tool.uv.workspace]
-members = ["src/orchestrator", "src/worker", "src/notifier"]
+members = ["src/orchestrator", "src/worker", "src/notifier", "src/tracker"]
 
 [tool.uv]
 dev-dependencies = [

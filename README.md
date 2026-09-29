@@ -22,7 +22,7 @@ Clearance filtering is tiered, not a blanket cutoff: Public Trust, Secret, and T
 
 <img src="docs/dashboard.png" alt="req-aggregator CloudWatch dashboard: per-function Lambda invocations/errors/throttles for the Orchestrator, Worker, and Notifier, Lambda duration, SQS queue depth and DLQ backlog, DynamoDB consumed capacity, EventBridge Scheduler invocation attempts, SES send/bounce/complaint, a table of recent errors and warnings across all three functions, a daily jobs-written trend, and a table of ATS/backend fetch warnings.">
 
-A CloudWatch dashboard (`main.tf`) tracks the pipeline end-to-end using only standard AWS-published metrics for Lambda, SQS, DynamoDB, EventBridge Scheduler, and SES, plus three CloudWatch Logs Insights widgets against the existing structured (Powertools JSON) logs — recent errors/warnings, jobs written per day, and ATS/backend fetch warnings (e.g. a company whose `ats` value doesn't match a supported backend). No custom metrics are emitted, so it stays within CloudWatch's free tier.
+A CloudWatch dashboard (`main.tf`) tracks the pipeline end-to-end using only standard AWS-published metrics for Lambda, SQS, DynamoDB, EventBridge Scheduler, and SES, plus three CloudWatch Logs Insights widgets against the existing structured (Powertools JSON) logs — recent errors/warnings, jobs written per day, and ATS/backend fetch warnings (e.g. a company whose `ats` value doesn't match a supported backend). No custom metrics are emitted, so it stays within CloudWatch's free tier. When `enable_tracking_api` is also true, a fourth row is appended with the `tracker` Lambda's invocations/errors/throttles and the tracking API Gateway's request/4xx/5xx counts.
 
 ## Usage
 
@@ -40,6 +40,18 @@ module "req_aggregator" {
 ```
 
 See [`examples/complete/`](examples/complete/) for a fully commented example setting every variable, and the [Configuration](#configuration) table below for a quick reference. Whatever runs `terraform apply` against this module needs `bash`, `pip3`/`python3.13`, `zip`, and `openssl` on `PATH` — Lambda packages are built automatically as part of `plan`/`apply` (see `scripts/build-lambda-package.sh`), no separate build step required.
+
+## Application Tracking
+
+An optional HTTP API (`enable_tracking_api`, defaults to `false`) records what happened after a posting was found — it extends the same `jobs` item the pipeline already writes, no separate table. It's a dedicated API Gateway HTTP API (not REST) plus its own `tracker` Lambda, with `AWS_IAM` authorization on every route — no API key, no Cognito, no custom authorizer. Callers need `execute-api:Invoke` on the API's ARN and a SigV4-signed request (e.g. [`awscurl`](https://github.com/okigan/awscurl), or any AWS SDK). The `tracker` Lambda's IAM role only has read/write access to the `jobs` table — it can't touch `companies`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/jobs` | List/filter jobs — optional `status`, `discovered_after`, `discovered_before` (bounds on `discovered_at`) query params |
+| `GET` | `/jobs/{job_id}` | Fetch a single job |
+| `PATCH` | `/jobs/{job_id}` | Partially update `date_applied`, `salary_range`, `source`, `status`, `response_date`, and/or `notes` |
+
+`PATCH` rejects any field outside that list, and rejects a `status` outside `applied`/`interviewing`/`rejected`/`offer`, both with `400`. An unknown `job_id` returns `404` on every route. See `tracker/handler.py`.
 
 ## DynamoDB Tables
 
@@ -59,6 +71,7 @@ See [`examples/complete/`](examples/complete/) for a fully commented example set
 | url           | S    | Job posting URL |
 | location      | S    | Location string |
 | discovered_at | S    | ISO-8601 timestamp |
+| date_applied<br>salary_range<br>source<br>status<br>response_date<br>notes | S | Set only via the [application-tracking API](#application-tracking) (`enable_tracking_api`); absent until a `PATCH /jobs/{job_id}` sets them |
 
 ## Local Development
 
@@ -132,25 +145,37 @@ Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/doc
 
 | Name | Type |
 | ---- | ---- |
+| [aws_apigatewayv2_api.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_api) | resource |
+| [aws_apigatewayv2_integration.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_integration) | resource |
+| [aws_apigatewayv2_route.tracker_get_job](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_route) | resource |
+| [aws_apigatewayv2_route.tracker_list_jobs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_route) | resource |
+| [aws_apigatewayv2_route.tracker_patch_job](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_route) | resource |
+| [aws_apigatewayv2_stage.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/apigatewayv2_stage) | resource |
 | [aws_cloudwatch_dashboard.observability](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_dashboard) | resource |
 | [aws_cloudwatch_log_group.notifier](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
 | [aws_cloudwatch_log_group.orchestrator](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
+| [aws_cloudwatch_log_group.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
+| [aws_cloudwatch_log_group.tracker_api_access](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
 | [aws_cloudwatch_log_group.worker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/cloudwatch_log_group) | resource |
 | [aws_dynamodb_table.companies](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/dynamodb_table) | resource |
 | [aws_dynamodb_table.jobs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/dynamodb_table) | resource |
 | [aws_iam_role.notifier](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.orchestrator](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.scheduler](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
+| [aws_iam_role.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role.worker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role) | resource |
 | [aws_iam_role_policy.notifier](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.orchestrator](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.scheduler](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
+| [aws_iam_role_policy.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.worker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_lambda_event_source_mapping.worker_sqs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_event_source_mapping) | resource |
 | [aws_lambda_function.notifier](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
 | [aws_lambda_function.orchestrator](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
+| [aws_lambda_function.tracker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
 | [aws_lambda_function.worker](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_function) | resource |
 | [aws_lambda_permission.cost_widget_dashboard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission) | resource |
+| [aws_lambda_permission.tracker_apigw](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lambda_permission) | resource |
 | [aws_scheduler_schedule.notifier_weekday](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/scheduler_schedule) | resource |
 | [aws_scheduler_schedule.notifier_weekend](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/scheduler_schedule) | resource |
 | [aws_scheduler_schedule.orchestrator_weekday](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/scheduler_schedule) | resource |
@@ -177,6 +202,7 @@ Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/doc
 | <a name="input_cost_allocation_tag_values"></a> [cost\_allocation\_tag\_values](#input\_cost\_allocation\_tag\_values) | Cost allocation tag values to filter Cost Explorer by. Defaults to [var.prefix] when null, matching the common default\_tags pattern of tagging every resource with the module's prefix (e.g. Project = local.prefix). Only used when enable\_cost\_widget is true. | `list(string)` | `null` | no |
 | <a name="input_enable_cost_widget"></a> [enable\_cost\_widget](#input\_enable\_cost\_widget) | Whether to add a Cost Explorer widget (via the ccliver/cw-cost-widget/aws module) to the observability dashboard. Defaults to false (unlike enable\_dashboard) because it requires a one-time manual step outside Terraform — activating cost\_allocation\_tag\_key as a Cost Allocation Tag in AWS Billing — and shows no data until that's done and Cost Explorer has accrued cost from activation forward. Has no effect when enable\_dashboard is false. | `bool` | `false` | no |
 | <a name="input_enable_dashboard"></a> [enable\_dashboard](#input\_enable\_dashboard) | Whether to create the CloudWatch observability dashboard. It's built entirely from standard AWS-published metrics and Logs Insights queries (no custom metrics), so it costs nothing beyond the free tier when unused — this exists to avoid spending one of the 3 free dashboards/account on it for module users who don't want it | `bool` | `true` | no |
+| <a name="input_enable_tracking_api"></a> [enable\_tracking\_api](#input\_enable\_tracking\_api) | Whether to create the application-tracking API: an API Gateway HTTP API (not REST) plus a dedicated tracker Lambda, both created only when true. Every route requires AWS\_IAM authorization (no custom authorizer). The Lambda has read/write access to the existing jobs table only (no companies table access) and extends its item schema in place — date\_applied, salary\_range, source, status, response\_date, notes — no new table. Defaults to false, matching the enable\_dashboard/enable\_cost\_widget optional-feature pattern. | `bool` | `false` | no |
 | <a name="input_exclude_title_keywords"></a> [exclude\_title\_keywords](#input\_exclude\_title\_keywords) | Comma-separated title substrings (OR'd together, case-insensitive); a title matching any of these is dropped even if it also matched title\_keywords | `string` | `"manager,director"` | no |
 | <a name="input_lambda_memory_mb"></a> [lambda\_memory\_mb](#input\_lambda\_memory\_mb) | Lambda function memory in MB (orchestrator and notifier) | `number` | `512` | no |
 | <a name="input_lambda_timeout_seconds"></a> [lambda\_timeout\_seconds](#input\_lambda\_timeout\_seconds) | Lambda function timeout in seconds | `number` | `300` | no |
@@ -204,6 +230,8 @@ Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/doc
 | <a name="output_jobs_table_name"></a> [jobs\_table\_name](#output\_jobs\_table\_name) | DynamoDB jobs table name |
 | <a name="output_notifier_lambda_arn"></a> [notifier\_lambda\_arn](#output\_notifier\_lambda\_arn) | ARN of the Notifier Lambda |
 | <a name="output_orchestrator_lambda_arn"></a> [orchestrator\_lambda\_arn](#output\_orchestrator\_lambda\_arn) | ARN of the Orchestrator Lambda |
+| <a name="output_tracker_lambda_arn"></a> [tracker\_lambda\_arn](#output\_tracker\_lambda\_arn) | ARN of the Tracker Lambda, or null if enable\_tracking\_api is false |
+| <a name="output_tracking_api_invoke_url"></a> [tracking\_api\_invoke\_url](#output\_tracking\_api\_invoke\_url) | Invoke URL for the application-tracking API, or null if enable\_tracking\_api is false |
 | <a name="output_worker_dlq_url"></a> [worker\_dlq\_url](#output\_worker\_dlq\_url) | SQS dead-letter queue URL for failed Worker messages |
 | <a name="output_worker_function_name"></a> [worker\_function\_name](#output\_worker\_function\_name) | Function name of the Worker Lambda |
 | <a name="output_worker_lambda_arn"></a> [worker\_lambda\_arn](#output\_worker\_lambda\_arn) | ARN of the Worker Lambda |

@@ -47,4 +47,5 @@ No resources.
 | <a name="output_companies_table_name"></a> [companies\_table\_name](#output\_companies\_table\_name) | n/a |
 | <a name="output_dashboard_url"></a> [dashboard\_url](#output\_dashboard\_url) | n/a |
 | <a name="output_jobs_table_name"></a> [jobs\_table\_name](#output\_jobs\_table\_name) | n/a |
+| <a name="output_tracking_api_invoke_url"></a> [tracking\_api\_invoke\_url](#output\_tracking\_api\_invoke\_url) | n/a |
 <!-- END_TF_DOCS -->

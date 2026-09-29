@@ -1,6 +1,11 @@
 locals {
-  prefix       = var.prefix
-  lambda_names = ["orchestrator", "worker", "notifier"]
+  prefix = var.prefix
+  # tracker is only built when its feature flag is on, so a consumer who
+  # doesn't want the tracking API never pays its pip3 install/zip cost.
+  lambda_names = concat(
+    ["orchestrator", "worker", "notifier"],
+    var.enable_tracking_api ? ["tracker"] : []
+  )
 }
 
 data "aws_caller_identity" "current" {}
@@ -149,6 +154,40 @@ resource "aws_iam_role_policy" "notifier" {
   })
 }
 
+resource "aws_iam_role" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  name               = "${local.prefix}-tracker"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+}
+
+resource "aws_iam_role_policy" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  name = "${local.prefix}-tracker-policy"
+  role = aws_iam_role.tracker[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # Least privilege: read/write on the jobs table only — no
+        # companies table access, unlike the other three Lambdas.
+        Sid      = "DynamoDBReadWriteJobs"
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:Scan", "dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.jobs.arn
+      },
+      {
+        Sid      = "CloudWatchLogs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "arn:aws:logs:*:*:*"
+      }
+    ]
+  })
+}
+
 
 resource "aws_lambda_function" "orchestrator" {
   function_name    = "${local.prefix}-orchestrator"
@@ -236,6 +275,32 @@ resource "aws_cloudwatch_log_group" "notifier" {
   retention_in_days = var.log_retention_days
 }
 
+resource "aws_lambda_function" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  function_name    = "${local.prefix}-tracker"
+  role             = aws_iam_role.tracker[0].arn
+  handler          = "tracker.handler.handler"
+  runtime          = "python3.13"
+  filename         = "${path.module}/.build/tracker.zip"
+  source_code_hash = data.external.lambda_build["tracker"].result.hash
+  timeout          = var.lambda_timeout_seconds
+  memory_size      = var.lambda_memory_mb
+
+  environment {
+    variables = {
+      JOBS_TABLE = aws_dynamodb_table.jobs.name
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_group" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  name              = "/aws/lambda/${aws_lambda_function.tracker[0].function_name}"
+  retention_in_days = var.log_retention_days
+}
+
 
 resource "aws_sqs_queue" "worker_dlq" {
   name                      = "${local.prefix}-worker-dlq"
@@ -319,6 +384,94 @@ resource "aws_dynamodb_table" "jobs" {
   tags = {
     Name = "${local.prefix}-jobs"
   }
+}
+
+
+# Application-tracking HTTP API (not REST) — every route requires AWS_IAM
+# authorization, no custom authorizer. Created only when enable_tracking_api
+# is true; the tracker Lambda itself is defined above, next to the other
+# three Lambdas.
+resource "aws_apigatewayv2_api" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  name          = "${local.prefix}-tracking-api"
+  protocol_type = "HTTP"
+}
+
+resource "aws_cloudwatch_log_group" "tracker_api_access" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  name              = "/aws/apigateway/${local.prefix}-tracking-api"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_apigatewayv2_stage" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  api_id      = aws_apigatewayv2_api.tracker[0].id
+  name        = "$default"
+  auto_deploy = true
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.tracker_api_access[0].arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      requestTime    = "$context.requestTime"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      protocol       = "$context.protocol"
+      responseLength = "$context.responseLength"
+      integrationErr = "$context.integrationErrorMessage"
+    })
+  }
+}
+
+resource "aws_apigatewayv2_integration" "tracker" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  api_id                 = aws_apigatewayv2_api.tracker[0].id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.tracker[0].invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "tracker_list_jobs" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  api_id             = aws_apigatewayv2_api.tracker[0].id
+  route_key          = "GET /jobs"
+  target             = "integrations/${aws_apigatewayv2_integration.tracker[0].id}"
+  authorization_type = "AWS_IAM"
+}
+
+resource "aws_apigatewayv2_route" "tracker_get_job" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  api_id             = aws_apigatewayv2_api.tracker[0].id
+  route_key          = "GET /jobs/{job_id}"
+  target             = "integrations/${aws_apigatewayv2_integration.tracker[0].id}"
+  authorization_type = "AWS_IAM"
+}
+
+resource "aws_apigatewayv2_route" "tracker_patch_job" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  api_id             = aws_apigatewayv2_api.tracker[0].id
+  route_key          = "PATCH /jobs/{job_id}"
+  target             = "integrations/${aws_apigatewayv2_integration.tracker[0].id}"
+  authorization_type = "AWS_IAM"
+}
+
+resource "aws_lambda_permission" "tracker_apigw" {
+  count = var.enable_tracking_api ? 1 : 0
+
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.tracker[0].function_name
+  principal     = "apigateway.amazonaws.com"
+  # /*/* covers every stage + route this API defines, scoped to this one API's execution ARN.
+  source_arn = "${aws_apigatewayv2_api.tracker[0].execution_arn}/*/*"
 }
 
 
@@ -694,6 +847,50 @@ locals {
       }
     }
   }
+
+  # Only meaningful (and only references the tracker resources) when
+  # enable_tracking_api is true — the outer conditional keeps the [0]
+  # index access from ever being evaluated otherwise.
+  tracker_dashboard_widgets = var.enable_tracking_api ? [
+    {
+      type   = "metric"
+      x      = 0
+      y      = 36
+      width  = 12
+      height = 6
+      properties = {
+        title  = "Tracker: Invocations / Errors / Throttles"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.tracker[0].function_name, { label = "Invocations" }],
+          ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.tracker[0].function_name, { label = "Errors" }],
+          ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.tracker[0].function_name, { label = "Throttles" }],
+        ]
+      }
+    },
+    {
+      type   = "metric"
+      x      = 12
+      y      = 36
+      width  = 12
+      height = 6
+      properties = {
+        title  = "Tracking API Gateway: Requests / 4xx / 5xx"
+        region = var.aws_region
+        view   = "timeSeries"
+        stat   = "Sum"
+        period = 300
+        metrics = [
+          ["AWS/ApiGateway", "Count", "ApiId", aws_apigatewayv2_api.tracker[0].id, { label = "Requests" }],
+          ["AWS/ApiGateway", "4xxError", "ApiId", aws_apigatewayv2_api.tracker[0].id, { label = "4xx" }],
+          ["AWS/ApiGateway", "5xxError", "ApiId", aws_apigatewayv2_api.tracker[0].id, { label = "5xx" }],
+        ]
+      }
+    },
+  ] : []
 }
 
 resource "aws_cloudwatch_dashboard" "observability" {
@@ -705,6 +902,7 @@ resource "aws_cloudwatch_dashboard" "observability" {
     start = "-P14D"
     widgets = concat(
       local.dashboard_widgets,
+      local.tracker_dashboard_widgets,
       var.enable_cost_widget && var.enable_dashboard ? [local.cost_widget] : []
     )
   })

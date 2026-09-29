@@ -47,3 +47,13 @@ output "cost_widget_lambda_arn" {
   description = "ARN of the cost widget Lambda, or null if enable_cost_widget/enable_dashboard is false"
   value       = var.enable_cost_widget && var.enable_dashboard ? module.cost_widget[0].lambda_function_arn : null
 }
+
+output "tracker_lambda_arn" {
+  description = "ARN of the Tracker Lambda, or null if enable_tracking_api is false"
+  value       = var.enable_tracking_api ? aws_lambda_function.tracker[0].arn : null
+}
+
+output "tracking_api_invoke_url" {
+  description = "Invoke URL for the application-tracking API, or null if enable_tracking_api is false"
+  value       = var.enable_tracking_api ? aws_apigatewayv2_stage.tracker[0].invoke_url : null
+}

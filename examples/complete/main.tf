@@ -31,6 +31,13 @@ module "req_aggregator" {
   cost_allocation_tag_key    = "Project"      # matches default_tags below
   cost_allocation_tag_values = [local.prefix] # or leave unset (null) to default to [prefix] automatically
 
+  # --- Application tracking API (off by default) ---
+  # Adds an API Gateway HTTP API + dedicated "tracker" Lambda for recording
+  # date_applied/salary_range/source/status/response_date/notes against jobs
+  # already in the table. Every route requires AWS_IAM (SigV4) auth
+  # See the "Application Tracking" section in the README.
+  enable_tracking_api = false
+
   # --- SES (required, no default — verify both addresses in SES first) ---
   ses_from_address = "you@yourdomain.com"
   ses_to_address   = "you@yourdomain.com"
@@ -84,4 +91,8 @@ output "companies_table_name" {
 
 output "jobs_table_name" {
   value = module.req_aggregator.jobs_table_name
+}
+
+output "tracking_api_invoke_url" {
+  value = module.req_aggregator.tracking_api_invoke_url
 }
