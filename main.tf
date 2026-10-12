@@ -230,6 +230,8 @@ resource "aws_lambda_function" "worker" {
       BUILTIN_WORK_TYPE          = var.builtin_work_type
       LOCATION                   = var.location
       WORK_TYPE                  = var.work_type
+      TALEO_SEARCH_LOCATION      = var.taleo_search_location
+      TALEO_SEARCH_RADIUS_MILES  = tostring(var.taleo_search_radius_miles)
       TITLE_KEYWORDS             = var.title_keywords
       EXCLUDE_TITLE_KEYWORDS     = var.exclude_title_keywords
       ALLOW_PUBLIC_TRUST         = tostring(var.allow_public_trust)
