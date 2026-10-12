@@ -22,6 +22,7 @@ from worker.handler import (
     _fetch_jobs,
     _fetch_lever_jobs,
     _fetch_oracle_jobs,
+    _fetch_taleo_jobs,
     _fetch_workday_jobs,
     _filter_relevant_jobs,
     _is_non_us_location,
@@ -398,6 +399,14 @@ def test_fetch_jobs_dispatches_oracle(mock_or) -> None:
     mock_or.return_value = []
     _fetch_jobs("Acme", "https://acme.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1", "oracle")
     mock_or.assert_called_once_with("https://acme.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1")
+
+
+@patch("worker.handler._fetch_taleo_jobs")
+def test_fetch_jobs_dispatches_taleo(mock_tl) -> None:
+    """_fetch_jobs should call _fetch_taleo_jobs for ats='taleo'."""
+    mock_tl.return_value = []
+    _fetch_jobs("Acme", "https://jobs.acme.com/search-jobs", "taleo")
+    mock_tl.assert_called_once_with("https://jobs.acme.com/search-jobs")
 
 
 # --- _fetch_greenhouse_jobs unit tests ---
@@ -1511,6 +1520,278 @@ def test_fetch_oracle_jobs_no_salary_key_when_none_found(mock_get) -> None:
     _mock_oracle_search(mock_get, {"platform": [_oracle_item([_oracle_posting("Platform Engineer", "1001")], total=1)]})
 
     jobs = _fetch_oracle_jobs(_ORACLE_CAREERS_URL)
+
+    assert "salary" not in jobs[0]
+
+
+# --- _fetch_taleo_jobs unit tests ---
+
+
+_TALEO_CAREERS_URL = "https://jobs.acme.com/search-jobs"
+_TALEO_GEOCODE_RESULT = [{"lat": 38.9687, "lon": -77.3411, "lp": "6252001-6254928-4758041-4781530"}]
+
+
+def _taleo_result_li(title: str, href: str, job_id: str, location: str = "Reston, VA, Onsite") -> str:
+    return f"""
+    <li>
+        <a href="{href}" data-job-id="{job_id}">
+            <h2>{title}</h2>
+            <span class="job-location">{location}</span>
+        </a>
+    </li>
+    """
+
+
+def _taleo_results_page(items: list[str]) -> str:
+    body = "".join(items) if items else '<p id="no-results">No results.</p>'
+    return f'<html><body><section id="search-results-list">{body}</section></body></html>'
+
+
+def _mock_taleo_gets(
+    mock_get,
+    keyword_pages: dict,
+    geocode_results: list[dict] | None = None,
+    description: str = "No clearance required.",
+) -> None:
+    """Wire mock_get.side_effect for geocode, per-keyword paginated search, and job-detail-page calls.
+
+    keyword_pages maps a "k" search param value to a list of page HTML
+    strings (as produced by _taleo_results_page); any keyword not in the map
+    — i.e. every TITLE_KEYWORDS entry not under test — gets an empty page on
+    its first call, matching a real "no results for this search" response.
+    Dispatches on the request URL ("/search-jobs/locations" is the geocode
+    call) and, otherwise, on whether a "k" search param is present (search
+    page vs. job-detail page).
+    """
+    cursors = {kw: list(pages) for kw, pages in keyword_pages.items()}
+
+    def fake_get(*args, **kwargs):
+        url = args[0]
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        if url.endswith("/search-jobs/locations"):
+            mock_resp.json.return_value = geocode_results if geocode_results is not None else _TALEO_GEOCODE_RESULT
+        elif "k" in kwargs.get("params", {}):
+            keyword = kwargs["params"]["k"]
+            pages = cursors.get(keyword)
+            mock_resp.text = pages.pop(0) if pages else _taleo_results_page([])
+        else:
+            mock_resp.text = f"<html><body><div class='job-description'>{description}</div></body></html>"
+        return mock_resp
+
+    mock_get.side_effect = fake_get
+
+
+def test_fetch_taleo_jobs_non_taleo_url_returns_empty() -> None:
+    """_fetch_taleo_jobs should return [] for a URL that isn't a parseable search-jobs URL."""
+    assert _fetch_taleo_jobs("https://acme.com/careers") == []
+
+
+def test_fetch_taleo_jobs_blank_search_location_returns_empty(monkeypatch) -> None:
+    """_fetch_taleo_jobs should return [] when TALEO_SEARCH_LOCATION is blank (conftest's default)."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "")
+    assert _fetch_taleo_jobs(_TALEO_CAREERS_URL) == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_geocode_empty_result_returns_empty(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should return [] when the location autocomplete finds no match."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Nowhereville, VA")
+    _mock_taleo_gets(mock_get, {}, geocode_results=[])
+
+    assert _fetch_taleo_jobs(_TALEO_CAREERS_URL) == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_geocode_request_failure_returns_empty(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should return [] when the geocode request raises."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    mock_get.side_effect = requests.RequestException("boom")
+
+    assert _fetch_taleo_jobs(_TALEO_CAREERS_URL) == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_search_request_failure_skips_gracefully(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should return [] (not raise) when a search request fails after a successful geocode."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+
+    def fake_get(*args, **kwargs):
+        if args[0].endswith("/search-jobs/locations"):
+            mock_resp = MagicMock()
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.json.return_value = _TALEO_GEOCODE_RESULT
+            return mock_resp
+        raise requests.RequestException("boom")
+
+    mock_get.side_effect = fake_get
+
+    assert _fetch_taleo_jobs(_TALEO_CAREERS_URL) == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_single_page(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should normalise postings from a single page of results."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get,
+        {
+            "platform": [
+                _taleo_results_page(
+                    [_taleo_result_li("Platform Engineer", "/job/acme/platform-engineer/641/1001", "1001")]
+                )
+            ]
+        },
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert jobs == [
+        {
+            "title": "Platform Engineer",
+            "url": "https://jobs.acme.com/job/acme/platform-engineer/641/1001",
+            "location": "Reston, VA, Onsite",
+        }
+    ]
+    locations_call = next(c for c in mock_get.call_args_list if c.args[0].endswith("/search-jobs/locations"))
+    assert locations_call.kwargs["params"] == {"term": "Reston, VA"}
+    platform_call = next(
+        c
+        for c in mock_get.call_args_list
+        if c.kwargs.get("params", {}).get("k") == "platform" and c.kwargs["params"].get("p") == 1
+    )
+    assert platform_call.kwargs["params"]["lat"] == 38.9687
+    assert platform_call.kwargs["params"]["lon"] == -77.3411
+    assert platform_call.kwargs["params"]["lp"] == "6252001-6254928-4758041-4781530"
+    assert platform_call.kwargs["params"]["r"] == "50"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_paginates_until_empty_page(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should keep requesting pages for a keyword until one comes back with no results."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get,
+        {
+            "platform": [
+                _taleo_results_page([_taleo_result_li("Platform Engineer I", "/job/a/1", "1001")]),
+                _taleo_results_page([_taleo_result_li("Platform Engineer II", "/job/b/2", "1002")]),
+            ]
+        },
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert len(jobs) == 2
+    platform_calls = [c for c in mock_get.call_args_list if c.kwargs.get("params", {}).get("k") == "platform"]
+    assert [c.kwargs["params"]["p"] for c in platform_calls] == [1, 2, 3]
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_dedupes_posting_seen_under_multiple_keywords(mock_get, monkeypatch) -> None:
+    """A posting matching more than one keyword search should only be processed once."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    posting = _taleo_result_li("Senior DevOps Platform Engineer", "/job/a/1", "1001")
+    _mock_taleo_gets(
+        mock_get,
+        {
+            "platform": [_taleo_results_page([posting])],
+            "devops": [_taleo_results_page([posting])],
+        },
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert len(jobs) == 1
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_skips_irrelevant_titles_without_description_fetch(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should never fetch a detail page for a title that isn't relevant."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get, {"platform": [_taleo_results_page([_taleo_result_li("Store Associate", "/job/a/1", "1001")])]}
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert jobs == []
+    search_calls = [c for c in mock_get.call_args_list if not c.args[0].endswith("/locations")]
+    detail_calls = [c for c in search_calls if "k" not in c.kwargs.get("params", {})]
+    assert detail_calls == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_excludes_high_clearance_description(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should drop a posting whose detail-page description requires a high clearance."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get,
+        {"platform": [_taleo_results_page([_taleo_result_li("Platform Engineer", "/job/a/1", "1001")])]},
+        description="Must hold an active Top Secret clearance.",
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert jobs == []
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_allows_public_trust_description(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should keep a posting whose detail-page description only requires Public Trust."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get,
+        {"platform": [_taleo_results_page([_taleo_result_li("Platform Engineer", "/job/a/1", "1001")])]},
+        description="Requires a Public Trust clearance.",
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert len(jobs) == 1
+    assert jobs[0]["clearance_tier"] == "public_trust"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_flags_ambiguous_clearance_for_review(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should keep, but flag, a posting with an unspecified clearance mention."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get,
+        {"platform": [_taleo_results_page([_taleo_result_li("Platform Engineer", "/job/a/1", "1001")])]},
+        description="Security clearance required.",
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert len(jobs) == 1
+    assert jobs[0]["clearance_review"] is True
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_extracts_salary_range(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should extract a salary range from the job's detail-page description."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get,
+        {"platform": [_taleo_results_page([_taleo_result_li("Platform Engineer", "/job/a/1", "1001")])]},
+        description="The salary range is $120,000 - $150,000 annually.",
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
+
+    assert jobs[0]["salary"] == "$120,000 - $150,000"
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_taleo_jobs_no_salary_key_when_none_found(mock_get, monkeypatch) -> None:
+    """_fetch_taleo_jobs should omit the salary key entirely when no range is found."""
+    monkeypatch.setenv("TALEO_SEARCH_LOCATION", "Reston, VA")
+    _mock_taleo_gets(
+        mock_get, {"platform": [_taleo_results_page([_taleo_result_li("Platform Engineer", "/job/a/1", "1001")])]}
+    )
+
+    jobs = _fetch_taleo_jobs(_TALEO_CAREERS_URL)
 
     assert "salary" not in jobs[0]
 

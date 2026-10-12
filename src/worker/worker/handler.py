@@ -18,6 +18,11 @@ ATS backends:
     oracle     - Oracle Fusion Cloud Recruiting's public REST API
                  (recruitingCEJobRequisitions) — the same endpoint the
                  career site's own search page calls, unauthenticated.
+    taleo      - Oracle Taleo via its TalentBrew-branded career site (a
+                 different product from Fusion Cloud Recruiting above,
+                 despite the shared "Oracle" name) — no public JSON API, so
+                 this scrapes the server-rendered search results page
+                 itself. See _fetch_taleo_jobs.
 
 All environment variables below are required — this app has no config
 defaults of its own (12-factor: config lives in the environment, supplied
@@ -67,6 +72,13 @@ Environment variables expected:
                               case-insensitive); a title matching any of these
                               is dropped even if it also matched
                               TITLE_KEYWORDS
+    TALEO_SEARCH_LOCATION      - Human-readable location (e.g. "Reston, VA")
+                              the taleo backend geocodes and searches within
+                              TALEO_SEARCH_RADIUS_MILES of. Blank skips any
+                              taleo-backed company entirely — see
+                              _fetch_taleo_jobs for why this is required
+                              rather than optional like LOCATION.
+    TALEO_SEARCH_RADIUS_MILES  - Radius in miles for the above.
 """
 
 from __future__ import annotations
@@ -98,6 +110,9 @@ _BUILTIN_MAX_PAGES = 15
 _ORACLE_URL_RE = re.compile(r"^https://([^/]+)/hcmUI/CandidateExperience/([^/]+)/sites/([^/?#]+)")
 _ORACLE_PAGE_SIZE = 20
 _ORACLE_MAX_JOBS_PER_KEYWORD = 1000
+
+_TALEO_URL_RE = re.compile(r"^https://([^/]+)/search-jobs/?$")
+_TALEO_MAX_PAGES_PER_KEYWORD = 10
 
 _WORK_TYPE_KEYWORDS = {
     "remote": ["remote", "distributed", "anywhere"],
@@ -1141,13 +1156,190 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
     return jobs
 
 
+def _geocode_taleo_location(host: str, location: str) -> tuple[float, float, str] | None:
+    """Resolve a human location string to the (lat, lon, location-path) triple a Taleo/TalentBrew
+    radius search needs — see _fetch_taleo_jobs for why a bare location string alone doesn't filter.
+
+    Uses the site's own address-autocomplete endpoint (the same one its search
+    box calls while typing) and takes its first, best-ranked match.
+
+    Returns:
+        (latitude, longitude, location_path) for the best match, or None if
+        the request failed, returned no matches, or came back in an
+        unexpected shape.
+    """
+    try:
+        resp = requests.get(
+            f"https://{host}/search-jobs/locations",
+            params={"term": location},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+    except (requests.RequestException, requests.exceptions.JSONDecodeError) as exc:
+        logger.warning("Taleo location geocode failed", host=host, location=location, error=str(exc))
+        return None
+    if not results:
+        return None
+    try:
+        best = results[0]
+        return float(best["lat"]), float(best["lon"]), best["lp"]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _fetch_taleo_job_description(url: str) -> str:
+    """Fetch a single Taleo/TalentBrew job's detail page and return its cleaned description text.
+
+    Returns "" on any failure, or if no .job-description container is found
+    — callers fall back to title-only clearance checking in that case,
+    rather than dropping the job outright over a transient error.
+    """
+    try:
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Taleo job detail fetch failed", url=url, error=str(exc))
+        return ""
+    soup = BeautifulSoup(resp.text, "html.parser")
+    description = soup.select_one(".job-description")
+    return description.get_text(separator=" ", strip=True) if description else ""
+
+
+def _fetch_taleo_jobs(careers_url: str) -> list[dict[str, Any]]:
+    """Fetch job listings from a Taleo/TalentBrew careers site (e.g. Kaiser Permanente).
+
+    Oracle Taleo exposes no clean public JSON API the way Fusion Cloud
+    Recruiting does for _fetch_oracle_jobs (a different Oracle product,
+    despite the shared name); its TalentBrew-branded front end instead
+    server-renders job results directly into the search page's HTML, which
+    is what this scrapes. Verified directly against a real Taleo/TalentBrew
+    site: passing TALEO_SEARCH_LOCATION as a plain "l" query param does
+    *not* filter anything server-side despite looking like it does — it's
+    echoed back into the page but every US result is still returned
+    regardless. Getting an actually-filtered result requires geocoding that
+    location first (_geocode_taleo_location) and passing its lat/lon/location
+    -path alongside a mile radius (TALEO_SEARCH_RADIUS_MILES), which is why
+    this backend needs that env var at all when every other backend relies
+    solely on post-fetch substring filtering via LOCATION/WORK_TYPE. That
+    radius search is a performance/relevance narrowing only, not a
+    replacement for the standard check: unlike "builtin"'s independent
+    BUILTIN_LOCATION/BUILTIN_WORK_TYPE, Taleo postings still go through the
+    normal _location_matches check in _filter_relevant_jobs afterward, since
+    the radius alone could admit postings outside the configured target
+    localities (e.g. Maryland/DC job postings within range of a Reston
+    anchor). The keyword search is fuzzy, not an exact substring match —
+    confirmed directly, e.g. a "pacu" search surfaces unrelated "Operating
+    Room Attendant" results — so every result is still re-checked with
+    _title_looks_relevant, and seen_ids dedupes postings surfaced under more
+    than one keyword. The search results page doesn't include descriptions,
+    so (mirroring _fetch_builtin_jobs) a title that already looks relevant
+    gets one follow-up request to its own detail page, for clearance
+    screening and a salary search.
+
+    Args:
+        careers_url: Careers URL of the form https://{host}/search-jobs.
+
+    Returns:
+        Normalised list of job dicts with title, url, location keys (plus
+        clearance_review=True for jobs with an ambiguous clearance mention,
+        clearance_tier for a known required tier (top_secret/secret/
+        public_trust), and salary when a pay range is found in the
+        description — see _extract_salary).
+    """
+    match = _TALEO_URL_RE.match(careers_url)
+    if not match:
+        logger.warning("Not a parseable Taleo/TalentBrew search URL", url=careers_url)
+        return []
+    host = match.group(1)
+
+    search_location = os.environ["TALEO_SEARCH_LOCATION"]
+    if not search_location:
+        logger.warning("TALEO_SEARCH_LOCATION is blank; skipping Taleo backend", url=careers_url)
+        return []
+    radius_miles = os.environ["TALEO_SEARCH_RADIUS_MILES"]
+
+    geocoded = _geocode_taleo_location(host, search_location)
+    if geocoded is None:
+        logger.warning("Could not geocode TALEO_SEARCH_LOCATION", url=careers_url, location=search_location)
+        return []
+    lat, lon, location_path = geocoded
+
+    jobs = []
+    clearance_skipped = 0
+    seen_ids: set[str] = set()
+
+    for keyword in _title_keywords():
+        for page in range(1, _TALEO_MAX_PAGES_PER_KEYWORD + 1):
+            try:
+                resp = requests.get(
+                    f"https://{host}/search-jobs",
+                    params={
+                        "k": keyword,
+                        "l": search_location,
+                        "lat": lat,
+                        "lon": lon,
+                        "lp": location_path,
+                        "r": radius_miles,
+                        "p": page,
+                    },
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+            except requests.RequestException as exc:
+                logger.warning("Taleo fetch failed", url=careers_url, keyword=keyword, page=page, error=str(exc))
+                break
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            result_list = soup.select_one("#search-results-list")
+            postings = result_list.select("li") if result_list else []
+            if not postings:
+                break
+
+            for posting in postings:
+                link = posting.select_one("a[data-job-id]")
+                title_el = posting.select_one("h2")
+                if not link or not title_el:
+                    continue
+                job_id = link.get("data-job-id")
+                if not isinstance(job_id, str) or job_id in seen_ids:
+                    continue
+                title = title_el.get_text(strip=True)
+                if not _title_looks_relevant(title):
+                    continue
+                seen_ids.add(job_id)
+                href = link.get("href", "")
+                job_url = f"https://{host}{href if isinstance(href, str) else ''}"
+                location_el = posting.select_one(".job-location")
+                location = location_el.get_text(strip=True) if location_el else ""
+                description = _fetch_taleo_job_description(job_url)
+                excluded, needs_review, tier = _clearance_decision(f"{title} {description}")
+                if excluded:
+                    clearance_skipped += 1
+                    continue
+                job = {"title": title, "url": job_url, "location": location}
+                if needs_review:
+                    job["clearance_review"] = True
+                if tier in ("top_secret", "secret", "public_trust"):
+                    job["clearance_tier"] = tier
+                salary = _extract_salary(description)
+                if salary:
+                    job["salary"] = salary
+                jobs.append(job)
+
+    logger.info("Taleo jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
+    return jobs
+
+
 def _fetch_jobs(company_name: str, careers_url: str, ats: str) -> list[dict[str, Any]]:
     """Dispatch to the appropriate ATS handler and return normalised job dicts.
 
     Args:
         company_name: Unused; kept for a uniform call signature across backends.
         careers_url: URL passed to the ATS handler.
-        ats: ATS backend identifier ("greenhouse", "lever", "workday", "builtin", or "oracle").
+        ats: ATS backend identifier ("greenhouse", "lever", "workday", "builtin", "oracle", or "taleo").
 
     Returns:
         Normalised list of job dicts with title, url, location keys (plus a
@@ -1164,6 +1356,8 @@ def _fetch_jobs(company_name: str, careers_url: str, ats: str) -> list[dict[str,
         return _fetch_builtin_jobs(careers_url)
     if ats == "oracle":
         return _fetch_oracle_jobs(careers_url)
+    if ats == "taleo":
+        return _fetch_taleo_jobs(careers_url)
     logger.warning("Unrecognised ATS backend", company=company_name, ats=ats)
     return []
 

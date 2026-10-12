@@ -98,6 +98,18 @@ variable "work_type" {
   default     = "remote"
 }
 
+variable "taleo_search_location" {
+  description = "Human-readable location (e.g. \"Reston, VA\") the Taleo/TalentBrew ATS backend geocodes and searches within taleo_search_radius_miles of. Required for that backend to return anything useful — unlike every other backend, Taleo's own search silently ignores a plain location string with no coordinates and falls back to unfiltered nationwide results (see _fetch_taleo_jobs). Blank disables the backend entirely (any companies.json entry with ats=taleo is skipped). This only narrows what's searched; the standard location/work_type check below still applies to its results afterward"
+  type        = string
+  default     = ""
+}
+
+variable "taleo_search_radius_miles" {
+  description = "Radius in miles around taleo_search_location to search within. Only used when taleo_search_location is set"
+  type        = number
+  default     = 50
+}
+
 variable "title_keywords" {
   description = "Comma-separated title substrings (OR'd together, case-insensitive) a job title must match at least one of to be kept at all; also drives one paginated Workday/Oracle search per entry"
   type        = string
