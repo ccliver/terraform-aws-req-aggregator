@@ -144,6 +144,17 @@ variable "allow_top_secret_clearance" {
   default     = false
 }
 
+variable "min_salary" {
+  description = "Drop job postings whose detected salary range tops out below this amount (USD/year). Postings with no detectable salary are always kept. 0 disables the filter"
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.min_salary >= 0 && floor(var.min_salary) == var.min_salary
+    error_message = "min_salary must be a non-negative whole number."
+  }
+}
+
 variable "lambda_timeout_seconds" {
   description = "Lambda function timeout in seconds"
   type        = number

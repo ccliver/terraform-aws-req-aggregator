@@ -1804,6 +1804,33 @@ def _job(title: str, location: str = "Remote") -> dict:
 
 
 @pytest.mark.parametrize(
+    ("salary", "kept"),
+    [
+        ("$80,000 - $100,000", False),
+        ("$90,000 - $180,000", True),
+        ("$120,000 - $150,000", True),
+        ("$53,000.00 - $60,000.00", False),
+        (None, True),
+        ("negotiable", True),
+    ],
+)
+def test_filter_min_salary(monkeypatch: pytest.MonkeyPatch, salary: str | None, kept: bool) -> None:
+    """MIN_SALARY drops ranges topping out below it, and always keeps jobs with no detected salary."""
+    monkeypatch.setenv("MIN_SALARY", "150000" if salary == "$90,000 - $180,000" else "120000")
+    job = _job("Platform Engineer")
+    if salary:
+        job["salary"] = salary
+    assert (len(_filter_relevant_jobs([job], "Acme")) == 1) is kept
+
+
+def test_filter_min_salary_zero_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MIN_SALARY=0 keeps even very low salary ranges."""
+    monkeypatch.setenv("MIN_SALARY", "0")
+    job = {**_job("Platform Engineer"), "salary": "$20,000 - $30,000"}
+    assert len(_filter_relevant_jobs([job], "Acme")) == 1
+
+
+@pytest.mark.parametrize(
     "title",
     [
         "Platform Engineer",

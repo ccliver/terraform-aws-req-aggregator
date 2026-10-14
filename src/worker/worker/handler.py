@@ -53,6 +53,10 @@ Environment variables expected:
                        Workday/Built In fetchers also skip the extra
                        per-posting detail-page request that exists only to
                        feed this check — see _clearance_screening_needed.
+    MIN_SALARY        - Integer; drop postings whose detected salary range
+                         tops out below this amount (see _salary_below_minimum).
+                         Postings with no detectable salary are always kept;
+                         0 disables the filter.
     LOCATION          - Comma-separated location substrings to additionally
                          keep (OR'd together) for every ATS backend except
                          builtin; blank disables it (remote-only)
@@ -132,6 +136,10 @@ def _title_keywords() -> list[str]:
     tests can monkeypatch.setenv per-test.
     """
     return [kw.strip().lower() for kw in os.environ["TITLE_KEYWORDS"].split(",") if kw.strip()]
+
+
+def _min_salary() -> int:
+    return int(os.environ["MIN_SALARY"])
 
 
 def _exclude_title_keywords() -> list[str]:
@@ -475,8 +483,9 @@ def _filter_relevant_jobs(jobs: list[dict[str, Any]], company: str) -> list[dict
     Performs case-insensitive substring matching against TITLE_KEYWORDS,
     then drops any of those matches whose title also hits EXCLUDE_TITLE_KEYWORDS
     (management/leadership roles), has a location indicating a non-US
-    posting, or (for every backend except "builtin") doesn't match the
-    configured LOCATION/WORK_TYPE. Built In jobs are exempt from that last
+    posting, (for every backend except "builtin") doesn't match the
+    configured LOCATION/WORK_TYPE, or has a detected salary range topping
+    out below MIN_SALARY (jobs with no detected salary are kept). Built In jobs are exempt from that last
     check since they're already filtered by their own independent
     BUILTIN_LOCATION/BUILTIN_WORK_TYPE config in _fetch_builtin_jobs —
     detected here via the per-job "company" key, which only the builtin
@@ -503,6 +512,7 @@ def _filter_relevant_jobs(jobs: list[dict[str, Any]], company: str) -> list[dict
     filtered = [j for j in matched if not any(kw in j["title"].lower() for kw in _exclude_title_keywords())]
     us_only = [j for j in filtered if not _is_non_us_location(j.get("location", ""))]
     work_type_matched = [j for j in us_only if "company" in j or _location_matches(j.get("location", ""))]
+    salary_matched = [j for j in work_type_matched if not _salary_below_minimum(j.get("salary"))]
     logger.info(
         "Job filter complete",
         company=company,
@@ -511,9 +521,10 @@ def _filter_relevant_jobs(jobs: list[dict[str, Any]], company: str) -> list[dict
         excluded=len(matched) - len(filtered),
         non_us_excluded=len(filtered) - len(us_only),
         work_type_excluded=len(us_only) - len(work_type_matched),
-        dropped=len(jobs) - len(work_type_matched),
+        salary_excluded=len(work_type_matched) - len(salary_matched),
+        dropped=len(jobs) - len(salary_matched),
     )
-    return work_type_matched
+    return salary_matched
 
 
 _SALARY_RANGE_RE = re.compile(r"\$?\s*\d{2,3},?\d{3}(?:\.\d{2})?\s*(?:-|–|—|to)\s*\$?\s*\d{2,3},?\d{3}(?:\.\d{2})?")
@@ -534,6 +545,20 @@ def _extract_salary(text: str) -> str | None:
     """
     match = _SALARY_RANGE_RE.search(text)
     return match.group(0).strip() if match else None
+
+
+def _salary_below_minimum(salary: str | None) -> bool:
+    """Whether a detected salary range's upper bound is below MIN_SALARY.
+
+    Compares the top of the range, not the bottom, so a wide or negotiable
+    range like "$90,000 - $180,000" isn't hidden. A missing or unparseable
+    salary is never below the minimum — unknown pay is kept for manual review.
+    """
+    minimum = _min_salary()
+    if not minimum or not salary:
+        return False
+    amounts = [int(float(n.replace(",", ""))) for n in re.findall(r"\d{2,3},?\d{3}(?:\.\d{2})?", salary)]
+    return bool(amounts) and max(amounts) < minimum
 
 
 def _plain_text(html_text: str) -> str:

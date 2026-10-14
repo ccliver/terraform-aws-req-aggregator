@@ -79,6 +79,9 @@ module "req_aggregator" {
   allow_secret_clearance     = false # also no polygraph/interviews required, but not yet worth pursuing
   allow_top_secret_clearance = false # requires a polygraph and friends/family interviews
 
+  # --- Salary filtering ---
+  min_salary = 0 # postings whose range tops out below this are dropped; no detected salary is kept
+
   # --- Lambda sizing ---
   lambda_timeout_seconds = 300
   lambda_memory_mb       = 512 # orchestrator + notifier

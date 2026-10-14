@@ -4,7 +4,7 @@ worker/handler.py has no config defaults of its own (12-factor: config lives
 in the environment) — LOCATION/WORK_TYPE/BUILTIN_LOCATION/BUILTIN_WORK_TYPE/
 TALEO_SEARCH_LOCATION/TALEO_SEARCH_RADIUS_MILES/TITLE_KEYWORDS/
 EXCLUDE_TITLE_KEYWORDS/ALLOW_PUBLIC_TRUST/ALLOW_SECRET_CLEARANCE/
-ALLOW_TOP_SECRET_CLEARANCE are required env vars, normally supplied by
+ALLOW_TOP_SECRET_CLEARANCE/MIN_SALARY are required env vars, normally supplied by
 Terraform (see variables.tf for the real defaults). Set at module level,
 matching the same values, so the existing test suite exercises realistic
 baseline behavior without every test setting them individually; tests that
@@ -24,3 +24,4 @@ os.environ["EXCLUDE_TITLE_KEYWORDS"] = "manager,director"
 os.environ["ALLOW_PUBLIC_TRUST"] = "true"
 os.environ["ALLOW_SECRET_CLEARANCE"] = "false"
 os.environ["ALLOW_TOP_SECRET_CLEARANCE"] = "false"
+os.environ["MIN_SALARY"] = "0"

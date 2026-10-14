@@ -237,6 +237,7 @@ resource "aws_lambda_function" "worker" {
       ALLOW_PUBLIC_TRUST         = tostring(var.allow_public_trust)
       ALLOW_SECRET_CLEARANCE     = tostring(var.allow_secret_clearance)
       ALLOW_TOP_SECRET_CLEARANCE = tostring(var.allow_top_secret_clearance)
+      MIN_SALARY                 = tostring(var.min_salary)
     }
   }
 }
