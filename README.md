@@ -43,7 +43,7 @@ See [`examples/complete/`](examples/complete/) for a fully commented example set
 
 ## Application Tracking
 
-An optional HTTP API (`enable_tracking_api`, defaults to `false`) records what happened after a posting was found — it extends the same `jobs` item the pipeline already writes, no separate table. It's a dedicated API Gateway HTTP API (not REST) plus its own `tracker` Lambda, with `AWS_IAM` authorization on every route — no API key, no Cognito, no custom authorizer. Callers need `execute-api:Invoke` on the API's ARN and a SigV4-signed request (e.g. [`awscurl`](https://github.com/okigan/awscurl), or any AWS SDK). The `tracker` Lambda's IAM role only has read/write access to the `jobs` table — it can't touch `companies`.
+An optional HTTP API (`enable_tracking_api`, defaults to `false`) records what happened after a posting was found, such as whether you applied and how it went. It stores that on the same `jobs` item the pipeline already writes, so there's no separate table. Every route uses `AWS_IAM` authorization: callers need `execute-api:Invoke` on the API's ARN and a SigV4-signed request (e.g. [`awscurl`](https://github.com/okigan/awscurl), any AWS SDK, or the [Streamlit example](examples/streamlit/)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -52,6 +52,8 @@ An optional HTTP API (`enable_tracking_api`, defaults to `false`) records what h
 | `PATCH` | `/jobs/{job_id}` | Partially update `date_applied`, `status`, `response_date`, and/or `notes` |
 
 `PATCH` rejects any field outside that list, and rejects a `status` outside `not_applied`/`applied`/`interviewing`/`rejected`/`offer`, both with `400`. `GET` responses always report a real `status` — a job the Worker wrote but nobody's touched yet reports `not_applied` rather than omitting the field, and `GET /jobs?status=not_applied` matches those untouched jobs too, not just ones explicitly set to it. An unknown `job_id` returns `404` on every route. See `tracker/handler.py`.
+
+For a ready-made UI instead of hand-signed requests, [`examples/streamlit/`](examples/streamlit/) is a local Streamlit app that browses and filters jobs and edits `status`, `date_applied`, `response_date`, and `notes` through this API. It signs each request with your own AWS credentials (boto3's default chain), so it needs no separate login or API key, and `task run` reads the invoke URL from Terraform's `tracking_api_invoke_url` output.
 
 ## DynamoDB Tables
 

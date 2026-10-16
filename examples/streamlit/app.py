@@ -239,7 +239,8 @@ def _edit_job_dialog(base_url: str, jobs_df: pd.DataFrame, job_id: str) -> None:
     st.subheader(f"{row['title']} — {row['company']}")
     st.caption(row["location"] or "—")
     if row["salary"]:
-        st.caption(f"💰 {row['salary']} (detected from the posting)")
+        salary = row["salary"].replace("$", r"\$")
+        st.caption(f"💰 {salary} (detected from the posting)")
     if row["url"]:
         st.markdown(f"[Open posting ↗]({row['url']})")
 
