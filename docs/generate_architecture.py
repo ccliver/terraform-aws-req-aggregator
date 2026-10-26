@@ -20,7 +20,14 @@ FONT = "Helvetica, Arial, sans-serif"
 ROWS = [
     ("card", [("integ", "◇", "EventBridge Scheduler", "triggers the Orchestrator")], False),
     ("edge", "↓", None),
-    ("card", [("lambda_", "λ", "Orchestrator Lambda", "scans companies, fans out"), ("db", "≣", "DynamoDB", "companies table · Scan")], False),
+    (
+        "card",
+        [
+            ("lambda_", "λ", "Orchestrator Lambda", "scans companies, fans out"),
+            ("db", "≣", "DynamoDB", "companies table · Scan"),
+        ],
+        False,
+    ),
     ("edge", "↓ SendMessage, 1/company", None),
     ("card", [("integ", "⬡", "SQS Queue", "batch_size = 1"), ("integ", "⬡", "SQS DLQ", "failed messages")], False),
     ("edge", "↓ trigger", None),
@@ -30,16 +37,38 @@ ROWS = [
     ("edge", "↓", None),
     ("card", [("db", "≣", "DynamoDB", "jobs table (deduplicated)")], False),
     ("edge", "↓ Query pending-digest-index", None),
-    ("card", [("lambda_", "λ", "Notifier Lambda", "builds HTML digest"), ("integ", "◇", "EventBridge Scheduler", "triggers the Notifier")], False),
+    (
+        "card",
+        [
+            ("lambda_", "λ", "Notifier Lambda", "builds HTML digest"),
+            ("integ", "◇", "EventBridge Scheduler", "triggers the Notifier"),
+        ],
+        False,
+    ),
     ("edge", "↓ SendEmail", None),
     ("card", [("ses", "✉", "SES", "grouped-by-company digest")], False),
     ("edge", "↓", None),
     ("inbox",),
     ("gap", 28),
     ("label", "Optional — application tracking (enable_tracking_api)"),
-    ("card", [("integ", "⇄", "API Gateway HTTP API", "AWS_IAM · GET/PATCH /jobs"), ("lambda_", "λ", "Tracker Lambda", "status, notes, dates")], True),
+    (
+        "card",
+        [
+            ("integ", "⇄", "API Gateway HTTP API", "AWS_IAM · GET/PATCH /jobs"),
+            ("lambda_", "λ", "Tracker Lambda", "status, notes, dates"),
+        ],
+        True,
+    ),
     ("edge", "↑ updates tracking fields on the jobs table", None),
 ]
+
+
+def text(x, y, content, fill, size=13, weight=None, anchor=None, family=FONT):
+    attrs = f' text-anchor="{anchor}"' if anchor else ""
+    attrs += f' font-weight="{weight}"' if weight else ""
+    return (
+        f'<text x="{x}" y="{y}"{attrs} font-size="{size}" fill="{fill}" font-family="{family}">{escape(content)}</text>'
+    )
 
 
 def card(x, y, w, t, color, glyph, title, sub, dashed):
@@ -47,9 +76,9 @@ def card(x, y, w, t, color, glyph, title, sub, dashed):
     return (
         f'<rect x="{x}" y="{y}" width="{w}" height="{H}" rx="10" fill="{t["card"]}" stroke="{t["border"]}"{dash}/>'
         f'<rect x="{x + 18}" y="{y + 15}" width="40" height="40" rx="8" fill="{COLORS[color]}"/>'
-        f'<text x="{x + 38}" y="{y + 42}" text-anchor="middle" font-size="22" fill="#fff" font-family="{FONT}">{escape(glyph)}</text>'
-        f'<text x="{x + 74}" y="{y + 31}" font-size="16" font-weight="700" fill="{t["text"]}" font-family="{FONT}">{escape(title)}</text>'
-        f'<text x="{x + 74}" y="{y + 52}" font-size="13" fill="{t["muted"]}" font-family="{FONT}">{escape(sub)}</text>'
+        + text(x + 38, y + 42, glyph, "#fff", 22, anchor="middle")
+        + text(x + 74, y + 31, title, t["text"], 16, 700)
+        + text(x + 74, y + 52, sub, t["muted"])
     )
 
 
@@ -65,33 +94,51 @@ def render(name):
                 out.append(card(M + i * (HALF + GAP), y, w, t, *c, row[2]))
             y += H
         elif kind == "edge":
-            out.append(f'<text x="{W / 2}" y="{y + 20}" text-anchor="middle" font-size="12" fill="{t["edge"]}" font-family="Menlo, monospace">{escape(row[1])}</text>')
+            out.append(text(W / 2, y + 20, row[1], t["edge"], 12, anchor="middle", family="Menlo, monospace"))
             y += 30
         elif kind == "inbox":
-            out.append(f'<rect x="{W / 2 - 22}" y="{y}" width="44" height="44" rx="8" fill="{COLORS["ext"]}"/>'
-                       f'<text x="{W / 2}" y="{y + 30}" text-anchor="middle" font-size="22" fill="#fff" font-family="{FONT}">✉</text>'
-                       f'<text x="{W / 2}" y="{y + 62}" text-anchor="middle" font-size="13" fill="{t["muted"]}" font-family="{FONT}">your inbox</text>')
+            out.append(
+                f'<rect x="{W / 2 - 22}" y="{y}" width="44" height="44" rx="8" fill="{COLORS["ext"]}"/>'
+                + text(W / 2, y + 30, "✉", "#fff", 22, anchor="middle")
+                + text(W / 2, y + 62, "your inbox", t["muted"], anchor="middle")
+            )
             y += 74
         elif kind == "gap":
             y += row[1]
         elif kind == "label":
-            out.append(f'<text x="{M}" y="{y + 4}" font-size="13" font-weight="700" fill="{t["muted"]}" font-family="{FONT}">{escape(row[1])}</text>')
+            out.append(text(M, y + 4, row[1], t["muted"], 13, 700))
             y += 18
     height = y + 70
-    legend = [("lambda_", "Compute (Lambda)"), ("db", "Database (DynamoDB)"), ("integ", "App Integration (SQS / EventBridge / API Gateway)"), ("ses", "Business Applications (SES)")]
+    legend = [
+        ("lambda_", "Compute (Lambda)"),
+        ("db", "Database (DynamoDB)"),
+        ("integ", "App Integration (SQS / EventBridge / API Gateway)"),
+        ("ses", "Business Applications (SES)"),
+    ]
     lx = M
     out.append(f'<line x1="{M}" y1="{height - 50}" x2="{W - M}" y2="{height - 50}" stroke="{t["border"]}"/>')
     for key, label in legend:
-        out.append(f'<circle cx="{lx + 5}" cy="{height - 24}" r="5" fill="{COLORS[key]}"/>'
-                   f'<text x="{lx + 16}" y="{height - 20}" font-size="12" fill="{t["muted"]}" font-family="{FONT}">{escape(label)}</text>')
+        out.append(
+            f'<circle cx="{lx + 5}" cy="{height - 24}" r="5" fill="{COLORS[key]}"/>'
+            + text(lx + 16, height - 20, label, t["muted"], 12)
+        )
         lx += 16 + len(label) * 6.6 + 24
     header = (
-        f'<text x="{W / 2}" y="78" text-anchor="middle" font-size="28" font-weight="700" fill="{t["text"]}" font-family="{FONT}">req-aggregator</text>'
-        f'<text x="{W / 2}" y="118" text-anchor="middle" font-size="14" fill="{t["muted"]}" font-family="{FONT}">Serverless job-board monitor on AWS — EventBridge fan-out, Lambda scraping,</text>'
-        f'<text x="{W / 2}" y="140" text-anchor="middle" font-size="14" fill="{t["muted"]}" font-family="{FONT}">DynamoDB storage, SES digest.</text>'
+        text(W / 2, 78, "req-aggregator", t["text"], 28, 700, "middle")
+        + text(
+            W / 2,
+            118,
+            "Serverless job-board monitor on AWS — EventBridge fan-out, Lambda scraping,",
+            t["muted"],
+            14,
+            anchor="middle",
+        )
+        + text(W / 2, 140, "DynamoDB storage, SES digest.", t["muted"], 14, anchor="middle")
     )
-    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{height}" viewBox="0 0 {W} {height}">'
-           f'<rect width="100%" height="100%" fill="{t["bg"]}"/>{header}{"".join(out)}</svg>')
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{height}" viewBox="0 0 {W} {height}">'
+        f'<rect width="100%" height="100%" fill="{t["bg"]}"/>{header}{"".join(out)}</svg>'
+    )
     svg_path = DOCS / f"architecture-{name}.svg"
     svg_path.write_text(svg)
     subprocess.run(["rsvg-convert", "-z", "2", "-o", str(DOCS / f"architecture-{name}.png"), str(svg_path)], check=True)
