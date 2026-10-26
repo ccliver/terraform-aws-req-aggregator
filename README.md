@@ -1,13 +1,14 @@
 # terraform-aws-req-aggregator
 
-Automated job board monitor. An EventBridge cron fans out one Lambda per company to scrape careers pages, deduplicates results in DynamoDB, and emails a daily digest via SES.
+Automated job board monitor. EventBridge Scheduler triggers an Orchestrator Lambda that fans out one SQS message per company to a Worker Lambda, which scrapes careers pages and deduplicates results in DynamoDB. A second schedule triggers a Notifier Lambda that emails a digest of new postings via SES (weekday and weekend schedules are configurable; by default it runs once on weekday mornings).
 
-The worker supports five scraping backends:
+The worker supports six scraping backends:
 - **Greenhouse / Lever / Workday** — direct JSON API calls
 - **Oracle** — Oracle Fusion Cloud Recruiting's public `recruitingCEJobRequisitions` REST API — the same unauthenticated endpoint the career site's own search page calls
+- **Taleo** — Oracle Taleo via its TalentBrew-branded career site (a different product from Fusion Cloud Recruiting); scrapes the server-rendered search results page, geocoding `taleo_search_location` and searching within `taleo_search_radius_miles` of it. Blank `taleo_search_location` skips the backend
 - **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
 
-Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not be a non-US posting, and must match a configurable location/work-type preference (defaults to remote-only — see [Configuration](#configuration)). See `worker/handler.py:_filter_relevant_jobs`.
+Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not be a non-US posting, must match a configurable location/work-type preference (defaults to remote-only — see [Configuration](#configuration)), and, if `min_salary` is set, must not have a detected salary range topping out below it (postings with no detectable salary are always kept). See `worker/handler.py:_filter_relevant_jobs`.
 
 Clearance filtering is tiered, not a blanket cutoff: Public Trust, Secret, and Top Secret are each independently allow/deny-able (`allow_public_trust`/`allow_secret_clearance`/`allow_top_secret_clearance`), and a posting with an unspecified/ambiguous clearance mention is never dropped outright — it's kept and flagged for manual review in the notifier digest instead. See `worker/handler.py:_clearance_decision`.
 
@@ -15,7 +16,7 @@ Clearance filtering is tiered, not a blanket cutoff: Public Trust, Secret, and T
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.png">
-  <img src="docs/architecture-light.png" alt="req-aggregator architecture: EventBridge triggers the Orchestrator Lambda, which scans the DynamoDB companies table and fans out one SQS message per company (with a DLQ for failures). The Worker Lambda consumes each message, fetching jobs via Greenhouse/Lever/Workday/Built In APIs, filters them, and writes new postings to the DynamoDB jobs table. A second EventBridge schedule triggers the Notifier Lambda, which scans recent jobs and sends an HTML digest via SES.">
+  <img src="docs/architecture-light.png" alt="req-aggregator architecture: EventBridge triggers the Orchestrator Lambda, which scans the DynamoDB companies table and fans out one SQS message per company (with a DLQ for failures). The Worker Lambda consumes each message, fetching jobs via the Greenhouse/Lever/Workday/Oracle/Taleo/Built In backends, filters them, and writes new postings to the DynamoDB jobs table. A second EventBridge schedule triggers the Notifier Lambda, which queries the pending-digest index for unsent jobs and sends an HTML digest via SES. A separate, optional API Gateway HTTP API and Tracker Lambda (enable_tracking_api) update application-tracking fields on the jobs table.">
 </picture>
 
 ## Observability
@@ -62,7 +63,7 @@ For a ready-made UI instead of hand-signed requests, [`examples/streamlit/`](exa
 |-------------|------|---------------|
 | company_name | S    | Partition key |
 | careers_url  | S    | Careers page URL |
-| ats          | S    | ATS backend (`greenhouse`, `lever`, `workday`, `oracle`, or `builtin`) |
+| ats          | S    | ATS backend (`greenhouse`, `lever`, `workday`, `oracle`, `taleo`, or `builtin`) |
 
 ### `req-aggregator-jobs`
 | Attribute     | Type | Role          |
@@ -73,6 +74,10 @@ For a ready-made UI instead of hand-signed requests, [`examples/streamlit/`](exa
 | url           | S    | Job posting URL |
 | location      | S    | Location string |
 | discovered_at | S    | ISO-8601 timestamp |
+| sent_in_digest | BOOL | `false` when written by the Worker; flipped to `true` by the Notifier after a successful send |
+| digest_pending | S    | `"pending"` while unsent; removed once emailed. Hash key of the sparse `pending-digest-index` GSI (range key `discovered_at`) the Notifier Queries |
+| clearance_tier | S    | Required clearance level (`public_trust`/`secret`/`top_secret`) when one was detected |
+| clearance_review | BOOL | `true` when the clearance mention was ambiguous; rendered as a "CLEARANCE UNCLEAR" badge in the digest |
 | salary        | S    | Pay range auto-detected from the posting text (`worker/handler.py:_extract_salary`); absent if none found — this is the only salary field, there's no separate user-entered one |
 | date_applied<br>status<br>response_date<br>notes | S | Set only via the [application-tracking API](#application-tracking) (`enable_tracking_api`); absent until a `PATCH /jobs/{job_id}` sets them |
 
@@ -102,7 +107,7 @@ uv run pre-commit install --hook-type pre-push  # for pytest
 
 ## Seeding Companies
 
-This module doesn't seed the companies table itself — that's a deployment-time concern for whatever root configuration instantiates it (using the `companies_table_name` output with the AWS CLI, a script, or your own tooling). `companies/companies.json` documents the expected shape, and doubles as a small usable starter list. Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, `oracle`, or `builtin`):
+This module doesn't seed the companies table itself — that's a deployment-time concern for whatever root configuration instantiates it (using the `companies_table_name` output with the AWS CLI, a script, or your own tooling). `companies/companies.json` documents the expected shape, and doubles as a small usable starter list. Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, `oracle`, `taleo`, or `builtin`):
 
 ```json
 [
@@ -115,6 +120,8 @@ This module doesn't seed the companies table itself — that's a deployment-time
 Pass these as module arguments (see the [Inputs](#inputs) section below for the full list — `examples/complete/main.tf` sets every one explicitly). All except `ses_from_address`/`ses_to_address` have defaults.
 
 `location`/`work_type` and `builtin_location`/`builtin_work_type` are deliberately separate: the curated company list often includes companies chosen for proximity to a specific place (e.g. a planned relocation), so a hybrid/on-site preference there shouldn't share Built In's broad-discovery "remote only" default. A job passes if it matches *either* the configured location *or* the work type (not both) — e.g. with `location = "Reston, VA"` and `work_type = "remote"`, both a Reston-based posting and a fully-remote posting anywhere would pass.
+
+`min_salary` (default `0`, off) drops a posting only when its detected salary range's *upper* bound is below the minimum; postings with no detected salary are always kept. `taleo_search_location`/`taleo_search_radius_miles` only narrow what the Taleo backend searches — its results still go through the standard `location`/`work_type` check afterward.
 
 The three `allow_*` clearance variables are each independent — an unspecified/ambiguous clearance mention (no level stated) is never dropped by any of them; it's kept and flagged for manual review in the notifier digest instead, unless every tier is already allowed. See `worker/handler.py:_clearance_decision`.
 

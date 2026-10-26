@@ -5,13 +5,13 @@
 terraform-aws-req-aggregator is an AWS serverless application that monitors company careers pages and emails a daily digest of new job postings. It uses three Lambda functions orchestrated by EventBridge, with SQS for fan-out, DynamoDB for storage, and SES for email delivery. A fourth, optional Lambda (`tracker`, gated behind `enable_tracking_api`) fronts an IAM-authenticated HTTP API for recording application status against jobs already in the table.
 
 ```
-EventBridge cron → Orchestrator Lambda → SQS (1 msg/company)
+EventBridge Scheduler → Orchestrator Lambda → SQS (1 msg/company)
                                               ↓
-                    Worker Lambda (Greenhouse/Lever/Workday/Built In APIs)
+                    Worker Lambda (Greenhouse/Lever/Workday/Oracle/Taleo/Built In)
                                               ↓
                                        DynamoDB jobs table  ←  Tracker Lambda  ←  API Gateway HTTP API (AWS_IAM)
                                               ↑                                   (optional, enable_tracking_api)
-EventBridge cron (+30min) → Notifier Lambda → SES email digest
+EventBridge Scheduler (separate weekday/weekend schedules, notifier offset from orchestrator) → Notifier Lambda → SES email digest
 ```
 
 ## Repo layout
@@ -23,12 +23,17 @@ outputs.tf
 versions.tf                      # required_providers only — no backend, no provider block
 scripts/
   build-lambda-package.sh        # builds each Lambda's zip automatically during plan/apply
+tests/
+  main.tftest.hcl                # `terraform test` — run by CI
+docs/                            # architecture-{light,dark}.png, dashboard.png (referenced by README)
 examples/
   complete/
     main.tf                      # every variable, fully commented — own provider block, local state, not for real deploys
     README.md
+  streamlit/                     # local Streamlit UI over the tracking API (SigV4-signed via boto3)
 companies/
   companies.json                 # example seed data documenting the expected schema (not consumed by this module directly)
+  companies.local.json           # gitignored personal list
 src/
   conftest.py                    # sets fake AWS creds at module level for pytest
   orchestrator/
@@ -57,6 +62,7 @@ uv run ruff format src/          # format
 uv run ty check src/             # type check
 uv run pre-commit run --all-files  # run all pre-commit hooks manually
 terraform fmt -check && terraform validate    # from repo root — no -chdir needed anymore
+terraform init && terraform test                # tests/main.tftest.hcl, as CI runs it
 cd examples/complete && terraform init && terraform plan   # exercises the module end-to-end (builds real Lambda zips, fails at the AWS-auth step without real credentials — that's expected)
 ```
 
@@ -107,8 +113,9 @@ cd examples/complete && terraform init && terraform plan   # exercises the modul
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs two jobs on PRs and pushes to main:
+GitHub Actions (`.github/workflows/ci.yml`) runs these jobs on PRs and pushes to main:
 1. **pre-commit** — runs all hooks (`ruff`, `ty`, `terraform_fmt`, `terraform_validate`, `terraform_docs`, `terraform_tflint`, `terraform_checkov`, `check-merge-conflict`, `end-of-file-fixer`). Requires terraform, tflint (v0.55.0), checkov (v3.2.526), and terraform-docs (v0.24.0) installed as separate steps before the pre-commit run. The `terraform_docs` hook shells out to whatever `terraform-docs` is on PATH (no bundled/pinned version of its own), so this CI pin must be kept in sync with whatever version is used for local development — a mismatch causes CI to "detect" a diff in `README.md` that doesn't reproduce locally. No Lambda-ZIP pre-build step is needed here anymore: `terraform_validate` never evaluates `data` sources, so `data.external.lambda_build` is never invoked during `validate`.
 2. **Tests** — `uv run pytest --tb=short -q`
+3. **terraform test** — `terraform init` then `terraform test` against `tests/main.tftest.hcl`
 
 pytest (`stages: [pre-push]`) is excluded from the pre-commit job since it runs in the dedicated test job.
