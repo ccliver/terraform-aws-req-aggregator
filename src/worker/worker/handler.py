@@ -53,6 +53,10 @@ Environment variables expected:
                        Workday/Built In fetchers also skip the extra
                        per-posting detail-page request that exists only to
                        feed this check — see _clearance_screening_needed.
+                       Independently of those vars, a kept posting that says
+                       the clearance can be obtained after hire ("ability to
+                       obtain", "will sponsor") is labelled
+                       clearance_sponsored=True — see _clearance_sponsored.
     MIN_SALARY        - Integer; drop postings whose detected salary range
                          tops out below this amount (see _salary_below_minimum).
                          Postings with no detectable salary are always kept;
@@ -212,6 +216,43 @@ _CLEARANCE_FALSE_POSITIVE_PHRASES = [
 ]
 
 
+# Wording that says the clearance can be obtained after hire (the employer
+# sponsors it) rather than being held already. Matched against hyphen-
+# normalised lowercase text, always within a clearance-related word's reach
+# so "ability to obtain a driver's license" doesn't count.
+_CLEARANCE_WORD = r"(?:clearance|secret|\bsci\b|public trust)"
+
+
+def _clearance_re(*alternatives: str) -> re.Pattern[str]:
+    return re.compile("|".join(alternatives).replace("WORD", _CLEARANCE_WORD))
+
+
+_CLEARANCE_OBTAINABLE_RE = _clearance_re(
+    r"\b(?:abilit\w*|able|eligib\w*|willing\w*|must|required|need|will|can)\b[^;]{0,25}"
+    r"\b(?:obtain\w*|acquir\w*|be granted|qualify\w* for|be cleared|receive)\b[^;]{0,50}WORD",
+    r"\beligib\w*\s+(?:for|to hold)\b[^;]{0,30}WORD",
+    r"\bsponsor\w*[^;]{0,40}WORD",
+    r"WORD[^;]{0,40}\bsponsor\w*",
+    r"\bclearable\b",
+)
+
+# Wording that says the clearance must already be held — or that sponsorship
+# is explicitly off the table. "maintain/obtain an active" is stripped first:
+# it's standard in "obtain and maintain an active Secret clearance" and says
+# nothing about holding one at hire.
+_CLEARANCE_MAINTAIN_ACTIVE_RE = re.compile(r"(?:maintain|obtain|acquire)\w*\s+(?:an?\s+)?(?:active|current)")
+_NEGATED_SPONSOR_RE = _clearance_re(
+    r"(?:\bnot\b|\bunable to\b|\bcannot\b|n't|\bno\b)\s+(?:\w+\s+){0,2}sponsor\w*[^;]{0,40}WORD",
+)
+_CLEARANCE_ACTIVE_REQUIRED_RE = _clearance_re(
+    r"\b(?:active|current|currently|existing)\b[^;]{0,25}(?:clearance|secret|\bsci\b|\bts\b|public trust)",
+    r"\b(?:must|required to|need to|should)\s+(?:currently\s+)?(?:hold|have|possess)\b[^;]{0,40}WORD",
+    r"WORD[^;]{0,60}(?:to start|prior to (?:start|hire|employment|onboarding)"
+    r"|at (?:the )?time of (?:hire|application|offer))",
+    _NEGATED_SPONSOR_RE.pattern,
+)
+
+
 def _allow_public_trust() -> bool:
     return os.environ["ALLOW_PUBLIC_TRUST"].lower() == "true"
 
@@ -272,6 +313,22 @@ def _clearance_tier(text: str) -> str:
     if any(kw in text_lower for kw in _GENERIC_CLEARANCE_KEYWORDS):
         return "ambiguous"
     return "none"
+
+
+def _clearance_sponsored(text: str) -> bool:
+    """Whether text says a clearance can be obtained after hire.
+
+    True for sponsor/"ability to obtain" wording with nothing saying the
+    clearance must already be held; text with both kinds of wording (e.g.
+    "active Secret required, ability to obtain TS") is too unclear to label.
+    """
+    text_lower = text.lower().replace("-", " ")
+    for phrase in _CLEARANCE_FALSE_POSITIVE_PHRASES:
+        text_lower = text_lower.replace(phrase, "")
+    if not _CLEARANCE_OBTAINABLE_RE.search(_NEGATED_SPONSOR_RE.sub("", text_lower)):
+        return False
+    held_text = _CLEARANCE_MAINTAIN_ACTIVE_RE.sub("", text_lower)
+    return not _CLEARANCE_ACTIVE_REQUIRED_RE.search(held_text)
 
 
 def _clearance_decision(text: str) -> tuple[bool, bool, str]:
@@ -629,6 +686,8 @@ def _fetch_greenhouse_jobs(careers_url: str) -> list[dict[str, Any]]:
             job["clearance_review"] = True
         if tier in ("top_secret", "secret", "public_trust"):
             job["clearance_tier"] = tier
+        if _clearance_sponsored(f"{title} {content}"):
+            job["clearance_sponsored"] = True
         salary = _extract_salary(_plain_text(content))
         if salary:
             job["salary"] = salary
@@ -687,6 +746,8 @@ def _fetch_lever_jobs(careers_url: str) -> list[dict[str, Any]]:
             job["clearance_review"] = True
         if tier in ("top_secret", "secret", "public_trust"):
             job["clearance_tier"] = tier
+        if _clearance_sponsored(title):
+            job["clearance_sponsored"] = True
         jobs.append(job)
     logger.info("Lever jobs fetched", url=careers_url, count=len(jobs), clearance_skipped=clearance_skipped)
     return jobs
@@ -805,6 +866,8 @@ def _fetch_workday_jobs(careers_url: str) -> list[dict[str, Any]]:
                     job["clearance_review"] = True
                 if tier in ("top_secret", "secret", "public_trust"):
                     job["clearance_tier"] = tier
+                if _clearance_sponsored(f"{title} {description}"):
+                    job["clearance_sponsored"] = True
                 salary = _extract_salary(_plain_text(description))
                 if salary:
                     job["salary"] = salary
@@ -1063,6 +1126,8 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
                 job["clearance_review"] = True
             if tier in ("top_secret", "secret", "public_trust"):
                 job["clearance_tier"] = tier
+            if _clearance_sponsored(f"{title} {description}"):
+                job["clearance_sponsored"] = True
             salary = ld_json_salary or _extract_salary(description)
             if salary:
                 job["salary"] = salary
@@ -1168,6 +1233,8 @@ def _fetch_oracle_jobs(careers_url: str) -> list[dict[str, Any]]:
                     job["clearance_review"] = True
                 if tier in ("top_secret", "secret", "public_trust"):
                     job["clearance_tier"] = tier
+                if _clearance_sponsored(f"{title} {description}"):
+                    job["clearance_sponsored"] = True
                 salary = _extract_salary(_plain_text(description))
                 if salary:
                     job["salary"] = salary
@@ -1349,6 +1416,8 @@ def _fetch_taleo_jobs(careers_url: str) -> list[dict[str, Any]]:
                     job["clearance_review"] = True
                 if tier in ("top_secret", "secret", "public_trust"):
                     job["clearance_tier"] = tier
+                if _clearance_sponsored(f"{title} {description}"):
+                    job["clearance_sponsored"] = True
                 salary = _extract_salary(description)
                 if salary:
                     job["salary"] = salary
@@ -1439,6 +1508,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 item["clearance_review"] = True
             if job.get("clearance_tier"):
                 item["clearance_tier"] = job["clearance_tier"]
+            if job.get("clearance_sponsored"):
+                item["clearance_sponsored"] = True
             if job.get("salary"):
                 item["salary"] = job["salary"]
             # condition_expression prevents overwriting existing items

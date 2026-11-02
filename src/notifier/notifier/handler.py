@@ -93,7 +93,8 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
     (set by the worker's _extract_salary when a posting's description
     contains a pay range) is rendered as a badge/suffix next to the title
     when present; omitted entirely otherwise, since most postings don't
-    include one.
+    include one. A job with clearance_sponsored=True (the posting says the
+    clearance can be obtained after hire) gets a "CLEARANCE SPONSORED" badge.
 
     Returns:
         Tuple of (text_body, html_body).
@@ -119,12 +120,15 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
             salary = job.get("salary", "").strip()
             review_suffix = " [CLEARANCE UNCLEAR - PLEASE VERIFY]" if needs_review else ""
             tier_suffix = f" [{tier_label} CLEARANCE]" if tier_label else ""
+            sponsored = bool(job.get("clearance_sponsored"))
+            sponsored_suffix = " [CLEARANCE SPONSORED]" if sponsored else ""
             salary_suffix = f" [{salary}]" if salary else ""
             text_lines.append(
                 f"  - {job['title']}"
                 + (f" ({location})" if location else "")
                 + salary_suffix
                 + tier_suffix
+                + sponsored_suffix
                 + review_suffix
                 + f"\n    {job['url']}"
             )
@@ -145,6 +149,13 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
                 if tier_label
                 else ""
             )
+            sponsored_badge = (
+                '<span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:4px;'
+                'background-color:#d4edda;color:#155724;font-size:11px;font-weight:600;">'
+                "CLEARANCE SPONSORED</span>"
+                if sponsored
+                else ""
+            )
             review_badge = (
                 '<span style="display:inline-block;margin-left:8px;padding:2px 8px;border-radius:4px;'
                 'background-color:#fff3cd;color:#856404;font-size:11px;font-weight:600;">'
@@ -156,7 +167,7 @@ def _build_email_body(jobs: list[dict[str, Any]]) -> tuple[str, str]:
                 f'<div style="padding:12px 0;border-bottom:1px solid #eeeef2;">'
                 f'<a href="{escape(job["url"])}" '
                 f'style="font-size:15px;font-weight:600;color:#3454d1;text-decoration:none;">'
-                f"{escape(job['title'])}</a>{salary_badge}{tier_badge}{review_badge}{location_html}</div>"
+                f"{escape(job['title'])}</a>{salary_badge}{tier_badge}{sponsored_badge}{review_badge}{location_html}</div>"
             )
 
         glassdoor_url = f"https://www.glassdoor.com/Search/results.htm?keyword={quote_plus(company)}"

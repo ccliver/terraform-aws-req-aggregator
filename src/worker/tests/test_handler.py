@@ -14,6 +14,7 @@ from moto import mock_aws
 from worker.handler import (
     _builtin_location_matches,
     _clearance_decision,
+    _clearance_sponsored,
     _extract_builtin_ld_json_salary,
     _extract_salary,
     _fetch_builtin_job_description,
@@ -223,6 +224,24 @@ def test_handler_writes_clearance_tier(mock_fetch, aws_resources: dict, lambda_c
 
     items = aws_resources["table"].scan()["Items"]
     assert items[0]["clearance_tier"] == "public_trust"
+
+
+@patch("worker.handler._fetch_jobs")
+def test_handler_writes_clearance_sponsored(mock_fetch, aws_resources: dict, lambda_context) -> None:
+    """handler() should persist clearance_sponsored for a job flagged by the fetcher."""
+    mock_fetch.return_value = [
+        {
+            "title": "Cloud Engineer",
+            "url": "https://acme.com/jobs/1",
+            "location": "Remote",
+            "clearance_sponsored": True,
+        },
+    ]
+
+    handler(_sqs_event("Acme Corp", "https://acme.com/jobs"), lambda_context)
+
+    items = aws_resources["table"].scan()["Items"]
+    assert items[0]["clearance_sponsored"] is True
 
 
 @patch("worker.handler._fetch_jobs")
@@ -2034,6 +2053,63 @@ def test_filter_empty_input_returns_empty() -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "Ability to obtain and maintain a Top Secret clearance.",
+        "Must be able to obtain a U.S. government Secret clearance.",
+        "Candidates must be eligible to obtain a TS/SCI clearance.",
+        "Willing to obtain an active Secret clearance.",
+        "We will sponsor your Secret clearance.",
+        "Clearance sponsorship is available for the right candidate.",
+        "Must be clearable at the Secret level.",
+        "Ability to obtain and maintain an active Secret clearance.",
+    ],
+)
+def test_clearance_sponsored_true_for_obtainable_wording(text: str) -> None:
+    """_clearance_sponsored should detect wording saying the clearance can be obtained after hire."""
+    assert _clearance_sponsored(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Must hold an active Secret clearance to start.",
+        "Active TS/SCI required. We do not sponsor clearances.",
+        "Ability to obtain a driver's license; Top Secret clearance required at time of hire.",
+        "Must have an active Secret clearance. Ability to obtain a Top Secret clearance within a year.",
+        "Ability to obtain AWS certifications.",
+        "No clearance required.",
+    ],
+)
+def test_clearance_sponsored_false_when_held_required_or_unrelated(text: str) -> None:
+    """Wording requiring an already-held clearance, refusing sponsorship, mixing both, or unrelated to
+    clearance must not be labelled sponsored."""
+    assert _clearance_sponsored(text) is False
+
+
+def test_clearance_decision_does_not_let_sponsorship_override_exclusion() -> None:
+    """Sponsorship is a label only — a disallowed tier is still excluded."""
+    text = "Ability to obtain and maintain a Top Secret clearance."
+    assert _clearance_decision(text) == (True, False, "top_secret")
+
+
+@patch("worker.handler.requests.get")
+def test_fetch_greenhouse_jobs_labels_sponsored_clearance(mock_get) -> None:
+    """_fetch_greenhouse_jobs should set clearance_sponsored on a kept posting that sponsors its clearance."""
+    mock_get.return_value.json.return_value = {
+        "jobs": [
+            _greenhouse_posting("Cloud Engineer", content="Ability to obtain a Public Trust clearance."),
+            _greenhouse_posting("Platform Engineer", content="Requires a Public Trust clearance."),
+        ]
+    }
+    jobs = _fetch_greenhouse_jobs("https://boards-api.greenhouse.io/v1/boards/acme/jobs")
+
+    by_title = {j["title"]: j for j in jobs}
+    assert by_title["Cloud Engineer"]["clearance_sponsored"] is True
+    assert "clearance_sponsored" not in by_title["Platform Engineer"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "Must have an active Top Secret clearance.",
         "Must have an active Top-Secret clearance.",
         "TS/SCI required for this role.",
@@ -2138,7 +2214,6 @@ def test_clearance_decision_none_for_no_clearance_mention(text: str) -> None:
     [
         "Active clearance required to start.",
         "Security clearance is required for this position.",
-        "Clearance sponsorship available for the right candidate.",
     ],
 )
 def test_clearance_decision_flags_ambiguous_mentions_for_review_by_default(text: str) -> None:

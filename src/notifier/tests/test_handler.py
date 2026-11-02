@@ -170,6 +170,24 @@ def test_build_email_body_shows_clearance_tier_badge(tier: str, label: str) -> N
     assert f"{label} CLEARANCE" in html
 
 
+def test_build_email_body_shows_clearance_sponsored_badge() -> None:
+    """Email body should label a job whose clearance is sponsored."""
+    jobs = [
+        {
+            "title": "Cloud Engineer",
+            "company": "Acme",
+            "url": "https://acme.com/1",
+            "location": "Remote",
+            "clearance_tier": "secret",
+            "clearance_sponsored": True,
+        }
+    ]
+    text, html = _build_email_body(jobs)
+
+    assert "[SECRET CLEARANCE] [CLEARANCE SPONSORED]" in text
+    assert "CLEARANCE SPONSORED" in html
+
+
 def test_build_email_body_omits_clearance_tier_badge_when_not_set() -> None:
     """Email body should not render a clearance_tier badge for a job without that field."""
     jobs = [{"title": "Cloud Engineer", "company": "Acme", "url": "https://acme.com/1", "location": "Remote"}]

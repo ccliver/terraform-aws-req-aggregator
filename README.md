@@ -10,7 +10,7 @@ The worker supports six scraping backends:
 
 Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not be a non-US posting, must match a configurable location/work-type preference (defaults to remote-only — see [Configuration](#configuration)), and, if `min_salary` is set, must not have a detected salary range topping out below it (postings with no detectable salary are always kept). See `worker/handler.py:_filter_relevant_jobs`.
 
-Clearance filtering is tiered, not a blanket cutoff: Public Trust, Secret, and Top Secret are each independently allow/deny-able (`allow_public_trust`/`allow_secret_clearance`/`allow_top_secret_clearance`), and a posting with an unspecified/ambiguous clearance mention is never dropped outright — it's kept and flagged for manual review in the notifier digest instead. See `worker/handler.py:_clearance_decision`.
+Clearance filtering is tiered, not a blanket cutoff: Public Trust, Secret, and Top Secret are each independently allow/deny-able (`allow_public_trust`/`allow_secret_clearance`/`allow_top_secret_clearance`), and a posting with an unspecified/ambiguous clearance mention is never dropped outright — it's kept and flagged for manual review in the notifier digest instead. A kept posting worded as obtainable after hire ("ability to obtain", "will sponsor") is additionally labelled "CLEARANCE SPONSORED" in the digest. See `worker/handler.py:_clearance_decision`.
 
 ## Architecture
 
