@@ -99,7 +99,7 @@ variable "work_type" {
 }
 
 variable "taleo_search_location" {
-  description = "Human-readable location (e.g. \"Reston, VA\") the Taleo/TalentBrew ATS backend geocodes and searches within taleo_search_radius_miles of. Required for that backend to return anything useful — unlike every other backend, Taleo's own search silently ignores a plain location string with no coordinates and falls back to unfiltered nationwide results (see _fetch_taleo_jobs). Blank disables the backend entirely (any companies.json entry with ats=taleo is skipped). This only narrows what's searched; the standard location/work_type check below still applies to its results afterward"
+  description = "Human-readable location (e.g. \"Reston, VA\") the Taleo/TalentBrew ATS backend geocodes and searches within taleo_search_radius_miles of. Required for that backend to return anything useful — unlike every other backend, Taleo's own search silently ignores a plain location string with no coordinates and falls back to unfiltered nationwide results (see _fetch_taleo_jobs). Blank disables the backend entirely (any companies-table entry with ats=taleo is skipped). This only narrows what's searched; the standard location/work_type check below still applies to its results afterward"
   type        = string
   default     = ""
 }

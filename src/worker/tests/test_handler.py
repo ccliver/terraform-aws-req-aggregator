@@ -984,7 +984,7 @@ def test_fetch_builtin_jobs_paginates_until_empty_page(mock_get, aws_resources: 
 
 @patch("worker.handler.requests.get")
 def test_fetch_builtin_jobs_skips_known_companies(mock_get, aws_resources: dict) -> None:
-    """_fetch_builtin_jobs should drop jobs whose company is already tracked in companies.json."""
+    """_fetch_builtin_jobs should drop jobs whose company is already tracked in the companies table."""
     _seed_companies(aws_resources["companies_table"], "Datadog")
     _mock_builtin_gets(
         mock_get,

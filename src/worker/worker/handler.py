@@ -14,7 +14,7 @@ ATS backends:
                  postings across many employers, so each returned job carries
                  its own "company" key instead of relying on the SQS
                  message's company_name. Jobs from companies already tracked
-                 directly elsewhere in companies.json are skipped.
+                 directly elsewhere in the companies table are skipped.
     oracle     - Oracle Fusion Cloud Recruiting's public REST API
                  (recruitingCEJobRequisitions) — the same endpoint the
                  career site's own search page calls, unauthenticated.
@@ -892,7 +892,7 @@ def _is_known_company(company: str, known_companies: set[str]) -> bool:
     """Check whether a Built In company name matches an already-tracked company.
 
     Uses substring containment (not just exact match) since Built In's display
-    name for a company often differs slightly from companies.json (e.g. "CACI"
+    name for a company often differs slightly from the companies table (e.g. "CACI"
     vs "CACI International", "Coinbase Global, Inc." vs "Coinbase").
     """
     company_lower = company.lower()
@@ -1035,7 +1035,7 @@ def _fetch_builtin_jobs(careers_url: str) -> list[dict[str, Any]]:
     page returns no job cards.
     Built In aggregates postings across many employers, so each job dict
     carries its own "company" key; jobs from companies already tracked
-    directly elsewhere in companies.json are skipped (they're covered, often
+    directly elsewhere in the companies table are skipped (they're covered, often
     more completely, by their own direct fetch). The search results don't
     include job descriptions, so for postings whose title already looks
     relevant (_title_looks_relevant), a follow-up request to the job's own

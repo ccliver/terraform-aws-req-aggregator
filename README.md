@@ -6,7 +6,7 @@ The worker supports six scraping backends:
 - **Greenhouse / Lever / Workday** — direct JSON API calls
 - **Oracle** — Oracle Fusion Cloud Recruiting's public `recruitingCEJobRequisitions` REST API — the same unauthenticated endpoint the career site's own search page calls
 - **Taleo** — Oracle Taleo via its TalentBrew-branded career site (a different product from Fusion Cloud Recruiting); scrapes the server-rendered search results page, geocoding `taleo_search_location` and searching within `taleo_search_radius_miles` of it. Blank `taleo_search_location` skips the backend
-- **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in `companies.json` are skipped
+- **Built In** — scrapes a Built In (builtin.com) search results page (server-rendered HTML); since it aggregates postings across many employers, each job carries its own company name and postings from companies already tracked directly elsewhere in the companies table are skipped
 
 Beyond ATS-specific scraping, every job is passed through a relevance filter before being written to DynamoDB: it must match a target-role keyword (platform/SRE/DevOps/cloud/infrastructure/staff engineer), must not look like a management role, must not be a non-US posting, must match a configurable location/work-type preference (defaults to remote-only — see [Configuration](#configuration)), and, if `min_salary` is set, must not have a detected salary range topping out below it (postings with no detectable salary are always kept). See `worker/handler.py:_filter_relevant_jobs`.
 
@@ -78,6 +78,7 @@ For a ready-made UI instead of hand-signed requests, [`examples/streamlit/`](exa
 | digest_pending | S    | `"pending"` while unsent; removed once emailed. Hash key of the sparse `pending-digest-index` GSI (range key `discovered_at`) the Notifier Queries |
 | clearance_tier | S    | Required clearance level (`public_trust`/`secret`/`top_secret`) when one was detected |
 | clearance_review | BOOL | `true` when the clearance mention was ambiguous; rendered as a "CLEARANCE UNCLEAR" badge in the digest |
+| clearance_sponsored | BOOL | `true` when the posting says the clearance can be obtained after hire ("ability to obtain", "will sponsor"); rendered as a "CLEARANCE SPONSORED" badge in the digest. A label only — never affects filtering |
 | salary        | S    | Pay range auto-detected from the posting text (`worker/handler.py:_extract_salary`); absent if none found — this is the only salary field, there's no separate user-entered one |
 | date_applied<br>status<br>response_date<br>notes | S | Set only via the [application-tracking API](#application-tracking) (`enable_tracking_api`); absent until a `PATCH /jobs/{job_id}` sets them |
 
@@ -107,7 +108,7 @@ uv run pre-commit install --hook-type pre-push  # for pytest
 
 ## Seeding Companies
 
-This module doesn't seed the companies table itself — that's a deployment-time concern for whatever root configuration instantiates it (using the `companies_table_name` output with the AWS CLI, a script, or your own tooling). `companies/companies.json` documents the expected shape, and doubles as a small usable starter list. Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, `oracle`, `taleo`, or `builtin`):
+This module doesn't seed the companies table itself — that's a deployment-time concern for whatever root configuration instantiates it (using the `companies_table_name` output with the AWS CLI, a script, or your own tooling). The expected entry shape is below. Each entry requires `company_name`, `careers_url`, and `ats` (`greenhouse`, `lever`, `workday`, `oracle`, `taleo`, or `builtin`):
 
 ```json
 [
@@ -119,11 +120,11 @@ This module doesn't seed the companies table itself — that's a deployment-time
 
 Pass these as module arguments (see the [Inputs](#inputs) section below for the full list — `examples/complete/main.tf` sets every one explicitly). All except `ses_from_address`/`ses_to_address` have defaults.
 
-`location`/`work_type` and `builtin_location`/`builtin_work_type` are deliberately separate: the curated company list often includes companies chosen for proximity to a specific place (e.g. a planned relocation), so a hybrid/on-site preference there shouldn't share Built In's broad-discovery "remote only" default. A job passes if it matches *either* the configured location *or* the work type (not both) — e.g. with `location = "Reston, VA"` and `work_type = "remote"`, both a Reston-based posting and a fully-remote posting anywhere would pass.
+`location`/`work_type` and `builtin_location`/`builtin_work_type` are deliberately separate: your company list often includes companies chosen for proximity to a specific place (e.g. a planned relocation), so a hybrid/on-site preference there shouldn't share Built In's broad-discovery "remote only" default. A job passes if it matches *either* the configured location *or* the work type (not both) — e.g. with `location = "Reston, VA"` and `work_type = "remote"`, both a Reston-based posting and a fully-remote posting anywhere would pass.
 
 `min_salary` (default `0`, off) drops a posting only when its detected salary range's *upper* bound is below the minimum; postings with no detected salary are always kept. `taleo_search_location`/`taleo_search_radius_miles` only narrow what the Taleo backend searches — its results still go through the standard `location`/`work_type` check afterward.
 
-The three `allow_*` clearance variables are each independent — an unspecified/ambiguous clearance mention (no level stated) is never dropped by any of them; it's kept and flagged for manual review in the notifier digest instead, unless every tier is already allowed. See `worker/handler.py:_clearance_decision`.
+The three `allow_*` clearance variables are each independent — an unspecified/ambiguous clearance mention (no level stated) is never dropped by any of them; it's kept and flagged for manual review in the notifier digest instead, unless every tier is already allowed. Separately, a kept posting worded as obtainable after hire is labelled "CLEARANCE SPONSORED" (`clearance_sponsored`) rather than filtered on. See `worker/handler.py:_clearance_decision`.
 
 ## CI
 
@@ -226,7 +227,7 @@ Pull requests run two jobs: **pre-commit** (ruff, ty, terraform fmt/validate/doc
 | <a name="input_schedule_timezone"></a> [schedule\_timezone](#input\_schedule\_timezone) | IANA timezone the schedule cron expressions are evaluated in (EventBridge Scheduler handles DST automatically) | `string` | `"America/New_York"` | no |
 | <a name="input_ses_from_address"></a> [ses\_from\_address](#input\_ses\_from\_address) | Verified SES sender email address | `string` | n/a | yes |
 | <a name="input_ses_to_address"></a> [ses\_to\_address](#input\_ses\_to\_address) | Recipient email address for job digests | `string` | n/a | yes |
-| <a name="input_taleo_search_location"></a> [taleo\_search\_location](#input\_taleo\_search\_location) | Human-readable location (e.g. "Reston, VA") the Taleo/TalentBrew ATS backend geocodes and searches within taleo\_search\_radius\_miles of. Required for that backend to return anything useful — unlike every other backend, Taleo's own search silently ignores a plain location string with no coordinates and falls back to unfiltered nationwide results (see \_fetch\_taleo\_jobs). Blank disables the backend entirely (any companies.json entry with ats=taleo is skipped). This only narrows what's searched; the standard location/work\_type check below still applies to its results afterward | `string` | `""` | no |
+| <a name="input_taleo_search_location"></a> [taleo\_search\_location](#input\_taleo\_search\_location) | Human-readable location (e.g. "Reston, VA") the Taleo/TalentBrew ATS backend geocodes and searches within taleo\_search\_radius\_miles of. Required for that backend to return anything useful — unlike every other backend, Taleo's own search silently ignores a plain location string with no coordinates and falls back to unfiltered nationwide results (see \_fetch\_taleo\_jobs). Blank disables the backend entirely (any companies-table entry with ats=taleo is skipped). This only narrows what's searched; the standard location/work\_type check below still applies to its results afterward | `string` | `""` | no |
 | <a name="input_taleo_search_radius_miles"></a> [taleo\_search\_radius\_miles](#input\_taleo\_search\_radius\_miles) | Radius in miles around taleo\_search\_location to search within. Only used when taleo\_search\_location is set | `number` | `50` | no |
 | <a name="input_title_keywords"></a> [title\_keywords](#input\_title\_keywords) | Comma-separated title substrings (OR'd together, case-insensitive) a job title must match at least one of to be kept at all; also drives one paginated Workday/Oracle search per entry | `string` | `"platform,sre,site reliability,devops,cloud engineer,infrastructure,staff engineer"` | no |
 | <a name="input_work_type"></a> [work\_type](#input\_work\_type) | Work-type keyword to keep for every ATS backend except builtin (remote, hybrid, office, any, or any literal substring). Independent of builtin\_work\_type | `string` | `"remote"` | no |

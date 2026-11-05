@@ -31,9 +31,6 @@ examples/
     main.tf                      # every variable, fully commented — own provider block, local state, not for real deploys
     README.md
   streamlit/                     # local Streamlit UI over the tracking API (SigV4-signed via boto3)
-companies/
-  companies.json                 # example seed data documenting the expected schema (not consumed by this module directly)
-  companies.local.json           # gitignored personal list
 src/
   conftest.py                    # sets fake AWS creds at module level for pytest
   orchestrator/

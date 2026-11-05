@@ -1,6 +1,0 @@
-[
-  {"company_name": "GitLab", "careers_url": "https://boards-api.greenhouse.io/v1/boards/gitlab/jobs", "ats": "greenhouse"},
-  {"company_name": "Palantir", "careers_url": "https://api.lever.co/v0/postings/palantir", "ats": "lever"},
-  {"company_name": "Northrop Grumman", "careers_url": "https://ngc.wd1.myworkdayjobs.com/Northrop_Grumman_External_Site", "ats": "workday"},
-  {"company_name": "Built In - AWS Search", "careers_url": "https://builtin.com/jobs?search=AWS&daysSinceUpdated=3", "ats": "builtin"}
-]

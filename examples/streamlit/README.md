@@ -63,7 +63,7 @@ Either way, Streamlit opens a browser tab at `http://localhost:8501`.
 
 ### Other ideas not built here
 
-A few more things that would be reasonable to add if useful: clearance-tier badges from the worker's `clearance_tier`/`clearance_review` fields, bulk status updates across multiple selected rows, and a "saved view" (persisting a filter combination as a named URL).
+A few more things that would be reasonable to add if useful: clearance-tier badges from the worker's `clearance_tier`/`clearance_review`/`clearance_sponsored` fields, bulk status updates across multiple selected rows, and a "saved view" (persisting a filter combination as a named URL).
 
 ## Styling
 

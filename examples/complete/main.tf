@@ -59,7 +59,7 @@ module "req_aggregator" {
   builtin_location  = ""       # same shape as location, independent setting, for the builtin backend only
   builtin_work_type = "remote"
 
-  # --- Taleo/TalentBrew search anchor (only used by companies.json entries with ats="taleo") ---
+  # --- Taleo/TalentBrew search anchor (only used by companies-table entries with ats="taleo") ---
   # Taleo's own search silently ignores a plain location string with no
   # coordinates, so this gets geocoded and searched by radius instead; the
   # location/work_type filtering above still applies to its results too.
