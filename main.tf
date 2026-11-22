@@ -502,6 +502,7 @@ resource "aws_scheduler_schedule" "orchestrator_weekday" {
   name                         = "${local.prefix}-orchestrator-weekday-schedule"
   schedule_expression          = var.orchestrator_weekday_schedule
   schedule_expression_timezone = var.schedule_timezone
+  state                        = var.schedule_enabled ? "ENABLED" : "DISABLED"
 
   flexible_time_window {
     mode = "OFF"
@@ -519,6 +520,7 @@ resource "aws_scheduler_schedule" "orchestrator_weekend" {
   name                         = "${local.prefix}-orchestrator-weekend-schedule"
   schedule_expression          = var.orchestrator_weekend_schedule
   schedule_expression_timezone = var.schedule_timezone
+  state                        = var.schedule_enabled ? "ENABLED" : "DISABLED"
 
   flexible_time_window {
     mode = "OFF"
@@ -534,6 +536,7 @@ resource "aws_scheduler_schedule" "notifier_weekday" {
   name                         = "${local.prefix}-notifier-weekday-schedule"
   schedule_expression          = var.notifier_weekday_schedule
   schedule_expression_timezone = var.schedule_timezone
+  state                        = var.schedule_enabled ? "ENABLED" : "DISABLED"
 
   flexible_time_window {
     mode = "OFF"
@@ -551,6 +554,7 @@ resource "aws_scheduler_schedule" "notifier_weekend" {
   name                         = "${local.prefix}-notifier-weekend-schedule"
   schedule_expression          = var.notifier_weekend_schedule
   schedule_expression_timezone = var.schedule_timezone
+  state                        = var.schedule_enabled ? "ENABLED" : "DISABLED"
 
   flexible_time_window {
     mode = "OFF"

@@ -68,6 +68,12 @@ variable "notifier_weekend_schedule" {
   default     = "cron(30 8 ? * SAT-SUN *)"
 }
 
+variable "schedule_enabled" {
+  description = "Whether the EventBridge schedules are enabled. Set to false to pause scraping and digest emails without destroying any infrastructure or data."
+  type        = bool
+  default     = true
+}
+
 variable "schedule_timezone" {
   description = "IANA timezone the schedule cron expressions are evaluated in (EventBridge Scheduler handles DST automatically)"
   type        = string
